@@ -1,0 +1,11 @@
+.pio
+.vscode
+*.key
+*.crt
+azure-pipelines - Kopie.yml
+!deploy/
+!deploy/*
+/data
+/managed_components/
+secrets.h
+.env

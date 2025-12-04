@@ -1,0 +1,59 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  - develop
+
+pool:
+  vmImage: "ubuntu-latest"
+
+name: "b2.0.$(Rev:r)"
+
+steps:
+  - task: DownloadSecureFile@1
+    name: secretsHeader # This name is used to reference the file path later
+    displayName: "Download secrets.h"
+    inputs:
+      secureFile: "secrets.h"
+  - task: DownloadSecureFile@1
+    name: envFile # Unique ID for this file
+    displayName: "Download .env"
+    inputs:
+      secureFile: ".env"
+  - script: |
+      mkdir $(Pipeline.Workspace)/build
+      cp -r $(Pipeline.Workspace)/s/** $(Pipeline.Workspace)/build
+      cp $(secretsHeader.secureFilePath) $(Pipeline.Workspace)/build/src/secrets.h
+      cp $(envFile.secureFilePath) $(Pipeline.Workspace)/build/.env
+      cd $(Pipeline.Workspace)/build
+      newversion=$(echo $(Build.BuildNumber) | sed 's/b//')
+      echo "Version: "
+      echo $newversion
+      sudo apt-get install python3-venv
+      wget -q https://raw.githubusercontent.com/platformio/platformio-core-installer/master/get-platformio.py
+      sudo PLATFORMIO_CORE_DIR=/opt/platformio python3 get-platformio.py
+      sudo  ln -s /opt/platformio/penv/bin/pio /usr/local/bin/pio
+      sudo usermod -a -G dialout $USER
+      pio --version
+      sed -i -e "s/0\.0\.0/$newversion/g" "$(Pipeline.Workspace)/build/src/main.cpp"
+      sed -i -e "s/#define DEBUG 1/#define DEBUG 1/g" $(Pipeline.Workspace)/build/src/main.cpp
+      sed -i -e "s/X.X.X/$newversion/g" $(Pipeline.Workspace)/build/deploy/espfota.json
+      sed -i -e "s/firmware.bin/firmware_epd7_dev.bin/g" $(Pipeline.Workspace)/build/deploy/espfota.json
+      pio pkg install
+      cp -r ./deploy/.pio ./
+      pio run
+      if [ ! -f "./.pio/build/ESP32-C6-DevKitM-1/firmware.bin" ]; then
+        echo "##[error]Build failed: firmware.bin was not created."
+        exit 1
+      fi
+      ls -la
+      mkdir artifact
+      cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_epd7_dev.bin
+      cp ./deploy/espfota.json ./artifact/espfota_epd7_dev.json
+  - task: PublishPipelineArtifact@1
+    inputs:
+      targetPath: "$(Pipeline.Workspace)/build/artifact/"
+      artifact: "epaper_fw_epd7_dev_$(Build.BuildNumber)"
+      publishLocation: "pipeline"

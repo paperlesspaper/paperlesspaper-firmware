@@ -1,0 +1,5 @@
+{
+  "type": "esp32-fota-http",
+  "version": "1.0.4",
+  "url": "http://sample.de/firmware.bin"
+}
