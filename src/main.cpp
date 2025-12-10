@@ -2989,6 +2989,7 @@ void setup() {
    if (StartCounter > 2) {
       bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
       if (updatedNeeded) {
+         displaySettings.quickRefresh = true;
          waitDisplayComplete(false);
          delay(200);
          displaySetText("DEV OTA Update...", true, true);
@@ -3005,6 +3006,7 @@ void setup() {
 #else
    bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
    if (updatedNeeded) {
+      displaySettings.quickRefresh = true;
       waitDisplayComplete(false);
       delay(200);
       displaySetText("Updating...", true, true);
