@@ -204,6 +204,7 @@ Preferences preferences;
 U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;
 Ticker onceTicker;
 Ticker perdiodicLed;
+Ticker perdiodicLedOff;
 Ticker onceDisplay;
 SerialFlashFile saveFile;
 
@@ -237,10 +238,12 @@ bool deviceActivationReset = false;
 bool isNewVersion = false;
 bool isDlUrl = false;
 bool periodicLedIsOn = false;
+int periodicLedTimeout = 0;
 bool epaperIsUpdating = false;
 bool isTestMode = false;  // enabled if the device is in deployment and tests are running
 bool buttonWake = false;
 
+void ledBlink(int timeout, bool on);
 bool awsConnect(bool connect);
 bool getVersionUpdate(void);
 int startupCounter(bool reset);
@@ -250,6 +253,7 @@ bool getActivatedFromMem(void);
 void debugFS(void);
 bool BleInit(String deviceId, bool enable);
 bool setUpdateState(String state);
+void writeIntToFlash(int value, int startAddr);
 int storeSleepTimeMem(int updateTime = 0);
 void gotToDeepSleep(int seconds, bool showScreen = true, bool motionWake = true);
 bool updateDisplayAsync(String functionName);
@@ -264,6 +268,7 @@ void displayTurnOn();
 void displayUpdatePicture();
 void displayWifiActivate(bool wifiProvisioningDone);
 bool waitDisplayComplete(bool quick);
+int accInit();
 bool accIntSet(int sensity);
 bool chargeMode(bool enable);
 bool usbInit();
@@ -318,10 +323,34 @@ void iotReceiveHandler(String& topic, String& payload) {
    deserializeJson(doc, payload);
 
    if (doc["url"].is<JsonString>()) {
-      Serial.println("[IOT RX] URL Message");
+      Serial.println("[IOT RX] Picture URL Message");
       const char* dlurl = doc["url"];
       sprintf(DL_URL, "%s%s", ENV_DOWNLOAD_URL, dlurl);
       isDlUrl = true;
+   }
+
+   if (doc["ota"].is<JsonString>()) {
+      const char* otaUrlTemp = doc["ota"];
+      size_t otaUrlLength = strlen(otaUrlTemp);
+      Serial.printf("[IOT RX] OTA URL received: '%s' (%d) \n", otaUrlTemp, otaUrlLength);
+      if (otaUrlLength > 5) {
+         myEsp32FOTA.setManifestURL(otaUrlTemp);
+         bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
+         if (updatedNeeded) {
+            displaySettings.quickRefresh = true;
+            waitDisplayComplete(false);
+            delay(200);
+            displaySetText("Updating Software...", true, true);
+            ledBlink(2000, true);
+            Serial.println("[MAIN] OTA via MQTT Started.....");
+            writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
+            resetAll(false, false);
+            myEsp32FOTA.execOTA();
+            delay(2000);
+         } else {
+            Serial.println("[MAIN] OTA URL is same Version - No OTA needed");
+         }
+      }
    }
 
    if (doc["t"].is<long>()) {
@@ -345,6 +374,9 @@ void iotReceiveHandler(String& topic, String& payload) {
          }
          if (doc["timeout"].is<int>()) {
             settings.timeout = doc["timeout"].as<int>();
+            if (settings.timeout < 60) {
+               settings.timeout = 60;  // minimum timeout 60 seconds TODO: add trigger to keep device always on
+            }
          }
          if (doc["clearscreen"].is<bool>()) {
             settings.clearscreen = doc["clearscreen"].as<bool>();
@@ -372,25 +404,36 @@ void iotReceiveHandler(String& topic, String& payload) {
    }
 }
 
+void ledBlinkFunctionOff() {
+   digitalWrite(LED_PIN, LOW);
+   perdiodicLedOff.detach();
+}
+
 void ledBlinkFunction() {
-   periodicLedIsOn = !periodicLedIsOn;
-   digitalWrite(LED_PIN, periodicLedIsOn);
+   digitalWrite(LED_PIN, HIGH);
+   perdiodicLedOff.attach_ms(periodicLedTimeout * 0.2, ledBlinkFunctionOff);
 }
 
 // set blink with timeout in ms
 void ledBlink(int timeout, bool on) {
    if (on) {
-      perdiodicLed.detach();
       if (timeout <= 0) {
-         delay(timeout + 100);
+         perdiodicLed.detach();
+         perdiodicLedOff.detach();
          digitalWrite(LED_PIN, HIGH);
          return;
       }
-      perdiodicLed.attach_ms(timeout, ledBlinkFunction);
+      periodicLedIsOn = true;
+      periodicLedTimeout = timeout * 2;
+      perdiodicLed.attach_ms(periodicLedTimeout, ledBlinkFunction);
+
    } else {
       perdiodicLed.detach();
-      delay(timeout + 100);
+      perdiodicLedOff.detach();
       digitalWrite(LED_PIN, LOW);
+      delay(periodicLedTimeout * 0.3);
+      digitalWrite(LED_PIN, LOW);
+      periodicLedIsOn = false;
    }
 }
 
@@ -1418,6 +1461,7 @@ bool getVersionUpdate(void) {
       }
    }
    if (isNewVersion) {
+      isNewVersion = false;
       int oldVersion = readIntFromFlash(150);
       Serial.print("[MAIN] Flash File Version (OLD|NEW): ");
       Serial.print(oldVersion);
@@ -1603,6 +1647,29 @@ void displayDebugInfo() {
    int wifiSignal = WiFi.RSSI();
    systemData.vddValue = readVDD(false);
    bool isUsb = usbCheckConnect();
+   int accTest = accInit();
+
+   // test flash
+   int buffLen = 4;
+   char testbuff[buffLen] = {'a', 'b', '1', '2'};
+   char testbuffread[buffLen];
+   SerialFlashFile saveFileTest;
+   SerialFlashFile saveFileTestRead;
+   if (SerialFlash.exists("testfile")) {
+      Serial.println("[FLASH] Test File delete");
+      SerialFlashFile file = SerialFlash.open("testfile");
+      file.erase();
+      saveFileTest.close();
+   }
+   SerialFlash.createErasable("testfile", 4);
+   saveFileTest = SerialFlash.open("testfile");
+   saveFileTest.write(testbuff, buffLen);
+   saveFileTest.close();
+   int testFileSize = saveFileTest.size();
+   saveFileTestRead = SerialFlash.open("testfile");
+   saveFileTestRead.seek(0);
+   saveFileTestRead.read(testbuffread, 4);
+   saveFileTestRead.close();
 
    info[1] = "";
 
@@ -1613,9 +1680,9 @@ void displayDebugInfo() {
    info[6] = "";
 
    info[7] = "Flash:";
-   info[8] = "Activated: " + String(getActivatedFromMem()) + " ActCount: " + String(readIntFromFlash(170)) + " FileVers: " + String(readIntFromFlash(150));
+   info[8] = "Activated: " + String(getActivatedFromMem()) + " ActCount: " + String(readIntFromFlash(170)) + " FileVers: " + String(readIntFromFlash(150)) + " TestFile: " + String(testbuffread);
    info[9] = "SSID: " + ssidRead + " PW: " + pwRead;
-   info[10] = "LINK: " + String(wifiSignal) + " BAT: " + String(systemData.vddValue) + "V USB: " + String(isUsb);
+   info[10] = "LINK: " + String(wifiSignal) + " BAT: " + String(systemData.vddValue) + "V USB: " + String(isUsb) + " ACC: " + String(accTest);
    Serial.println("[TEST] START");
    for (int i = 0; i < textLines; i++) {
       Serial.println(info[i]);
@@ -2443,7 +2510,7 @@ bool deployDevice() {
 
    sprintf(payload, "{\"act\": 1,\"v\": \"%s\",\"file\": \"%d\",\"bat\": \"%d\",\"wake\": \"%d, %d\",\"wifi\": \"%d, %d\",\"usb\": \"%d\",\"orient\": \"%d\",\"timeout\": \"%d\"}", SOFTWARE_VERSION, oldVersion, systemData.vddValue, rtc_get_reset_reason(0), rtc_get_reset_reason(1), wifiSettings.wifiRetries, wifiSettings.wifiQuality, systemData.usbConnected, systemData.deviceOrientation, sleepTime);  // Create the payload for publishing
    int counter = 0;
-   while (counter < 5 && deviceActivated == false && deviceActivationNotStarted == false) {
+   while (counter < 7 && deviceActivated == false && deviceActivationNotStarted == false) {
       awsConnect(true);
       if (client.publish(TOPIC_ACTIVATE, payload, false, 1)) {
          Serial.println("[IOT] Request Activation");
@@ -2453,7 +2520,7 @@ bool deployDevice() {
          client.loop();
       }
       int counter2 = 0;
-      while (counter2 < 100 && deviceActivated == false && deviceActivationNotStarted == false && !isDlUrl) {
+      while (counter2 < 50 && deviceActivated == false && deviceActivationNotStarted == false && !isDlUrl) {
          counter2++;
          client.loop();
          vTaskDelay(50);
@@ -2522,7 +2589,7 @@ bool getImageUrl(bool reset) {
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
    WiFi.disconnect(true);
-   accIntSet(50);  // Set acc int wakeup
+   accIntSet(80);  // Set acc int wakeup
    waitDisplayComplete(false);
    if (wakeuptimeout <= 0 && showScreen) {
       displayTurnOn();  // Ich schlafe screen
@@ -2740,10 +2807,9 @@ int accInit() {
 #if DEBUG
    if (myIMU.readRegister(&readData, KXTJ3_WHO_AM_I) ==
        IMU_SUCCESS) {
-      Serial.print("[ACC] Who am I? 0x");
-      Serial.println(readData, HEX);
    } else {
       Serial.println("[ACC] Communication error, stopping.");
+      return -1;
       // while (true);  // stop running sketch if failed
    }
 #endif
@@ -2818,11 +2884,9 @@ bool chargeMode(bool enable) {
       if (chargeState == LOW) {
          Serial.println("[CHARGE] on - Charging");
          isCharging = true;
-         ledBlink(0, true);
       } else {
          Serial.println("[CHARGE] on - Charge Done");
          digitalWrite(CHG_EN_PIN, LOW);
-         ledBlink(500, true);
       }
    } else {
       pinMode(CHG_EN_PIN, OUTPUT);
@@ -2832,11 +2896,9 @@ bool chargeMode(bool enable) {
       if (chargeState == LOW) {
          Serial.println("[CHARGE] off - Charging");
          isCharging = true;
-         ledBlink(0, true);
       } else {
          Serial.println("[CHARGE] off - Charge Done");
          digitalWrite(CHG_EN_PIN, LOW);
-         ledBlink(500, true);
       }
    }
    return isCharging;
@@ -2959,6 +3021,8 @@ void setup() {
 
    setDeviceUid();
 
+   // TODO: maybe do a function to generally check updated mem values
+
    systemData.deviceOrientation = accInit();
    // default is rotationText = 3 and rotationPicture = 2
    if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
@@ -3009,7 +3073,7 @@ void setup() {
       displaySettings.quickRefresh = true;
       waitDisplayComplete(false);
       delay(200);
-      displaySetText("Updating...", true, true);
+      displaySetText("Updating Software...", true, true);
       ledBlink(2000, true);
       Serial.println("[MAIN] OTA Started.....");
       writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
@@ -3020,6 +3084,25 @@ void setup() {
       Serial.println("[MAIN] no OTA needed");
    }
 #endif
+
+   if (systemData.deviceOrientation != readIntFromFlash(220)) {
+      int accCheck = accInit();
+      if (accCheck != readIntFromFlash(220)) {
+         systemData.deviceOrientation = accCheck;
+         Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
+         writeIntToFlash(systemData.deviceOrientation, 220);
+         writeIntToFlash(0, 150);  // Reset picture version after ota to init update
+         if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
+            displaySettings.rotationText = 1;
+            displaySettings.rotationPicture = 0;
+         }
+      } else {
+         if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck 2\n");
+      }
+   } else {
+      if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck 1\n");
+   }
+
    startupCounter(true);
    bool activationDone = deployDevice();
    saveSettingsToFlash(EEPROM_SETTINGS_ADR);

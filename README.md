@@ -1,4 +1,4 @@
-# Paperlesspaper E-Paper ESP32-C6 Firmware
+# E-Paper ESP32-C6 Firmware
 
 Firmware for an ESP32-C6 based E-Paper display device, featuring BLE provisioning, AWS IoT connectivity, and OTA updates.
 
@@ -71,6 +71,7 @@ Firmware for an ESP32-C6 based E-Paper display device, featuring BLE provisionin
 *   `190`: Display Revision Store
 *   `200`: WiFi Lost State
 *   `210`: Sleep Time
+*   `220`: Dispay Orientation Store
 *   `500+`: Settings Store
 
 ## Hardware Settings
