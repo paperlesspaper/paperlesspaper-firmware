@@ -1,6 +1,8 @@
 # E-Paper ESP32-C6 Firmware
 
-Firmware for an ESP32-C6 based E-Paper display device, featuring BLE provisioning, AWS IoT connectivity, and OTA updates.
+Firmware for an ESP32-C6 based E-Paper display device, featuring BLE provisioning, AWS IoT connectivity, and OTA updates. We use the firmware in our [paperlesspaper OpenPaper 7](https://paperlesspaper.de/en/buy-7-inch-epaper-picture-frame). Check [paperlesspaper Github](https://github.com/paperlesspaper) for hardware source files.
+
+![paperlesspaper preview](https://paperlesspaper.de/_next/image?url=https%3A%2F%2Fres.cloudinary.com%2Fwirewire%2Fimage%2Fupload%2FIMG_5826-Bearbeitet.jpg.jpg&w=3840&q=75)
 
 ## Hardware Requirements
 
