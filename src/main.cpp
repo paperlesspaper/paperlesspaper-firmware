@@ -118,6 +118,10 @@ const bool DEBUG_FLAG = false;
 #define FONT_INFO u8g2_font_7x14_tf
 #define FONT_VERSION u8g2_font_tom_thumb_4x6_tf
 
+#define SLEEP_RECALCULATION_PERIOD_SECONDS 60
+
+RTC_DATA_ATTR timeval previousWakeup = timeval { .tv_sec = 0, .tv_usec = 0 };
+
 struct wifiSettings {
    String bleSSID;  // Seconds to Sleep after update done
    String blePASS;  // Color Settings for EPD
@@ -274,6 +278,7 @@ bool chargeMode(bool enable);
 bool usbInit();
 bool usbCheckConnect();
 void debugCheck();
+int calculateSleepDuration(int defaultTimeout);
 
 void WiFiEvent(WiFiEvent_t event) {
    if (DEBUG_FLAG)
@@ -596,6 +601,35 @@ void restoreSettingsToFlash(int startAddr) {
    if (DEBUG_FLAG) {
       Serial.printf("[MEM] Settings - ClearScreen: %d BatteryWarning: %d WifiWarning: %d \n", settings.clearscreen, settings.showBatteryWarning, settings.showWifiWarning);
    }
+}
+
+int calculateSleepDuration(int defaultTimeout) {
+   struct timeval now;
+   gettimeofday(&now, NULL);
+
+   if(esp_sleep_get_wakeup_cause() == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_TIMER) {
+      Serial.printf("[MAIN] last reset was timer-induced, using full wakeup period...\n");
+      return defaultTimeout;
+   }
+
+   if(previousWakeup.tv_sec > now.tv_sec) {
+      Serial.printf("[MAIN] detected invalid previous wakeup, resetting...\n");
+      previousWakeup = timeval {
+         .tv_sec = 0,
+         .tv_usec = 0
+      };
+   }
+
+   time_t diff = now.tv_sec - previousWakeup.tv_sec;
+
+   Serial.printf("[MAIN] current time: %lld, previous time: %lld, difference: %lld\n", now.tv_sec, previousWakeup.tv_sec, diff);
+   // if the user refreshes less than one minute before the actual refresh will occur, skip that next refresh and use the current one instead.
+   if(diff < SLEEP_RECALCULATION_PERIOD_SECONDS) {
+      Serial.printf("[MAIN] manual reset within 60 seconds of wakeup window. Skipping next refresh.\n");
+      return defaultTimeout;
+   }
+
+   return defaultTimeout - diff;
 }
 
 // charger active, refresh screen, scan wifi, ble adv
@@ -2588,6 +2622,13 @@ bool getImageUrl(bool reset) {
 // sleep x seconds
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
+
+   struct timeval currentTime;
+   gettimeofday(&currentTime, NULL);
+   
+   //this is important for next wakeup calculation, do not delete it.
+   previousWakeup = currentTime;
+
    WiFi.disconnect(true);
    accIntSet(80);  // Set acc int wakeup
    waitDisplayComplete(false);
@@ -2928,6 +2969,7 @@ void checkDeviceBatch(int set = 0) {
 
 void test() {
    // adcAttachPin(14);  // Any pin that is ADC capable
+
    ledBlink(0, false);
    char charBuffer[128];
    pinMode(INT_PIN, OUTPUT);
@@ -2953,16 +2995,15 @@ void test() {
    restoreSettingsToFlash(EEPROM_SETTINGS_ADR);
 
    while (true) {
-      delay(5000);
-   }
-
-   while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
       bool testCharge = chargeMode(true);
       systemData.vddValue = readVDD(false);
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
-      delay(5000);
+
+      Serial.printf("time to next update: %d\n", calculateSleepDuration(settings.timeout));
+
+      gotToDeepSleep(60 * 2);
    };
 
    // display.powerOff();
@@ -3221,10 +3262,12 @@ void loop() {
    if (!downloadStart) {
       // Picture Update Done
       Serial.println("[MAIN] End of Update");
+      int timeout;
       if (settings.timeout > 0) {
-         gotToDeepSleep(settings.timeout);
+         timeout = calculateSleepDuration(settings.timeout);
       } else {
-         gotToDeepSleep(DEFAULT_SLEEP);
+         timeout = calculateSleepDuration(DEFAULT_SLEEP);
       }
+      gotToDeepSleep(timeout);
    }
 }
