@@ -104,6 +104,7 @@ const char* crtFileCons;
 #define BAT_LOW_VALUE 4200          // value to show battery low
 #define BAT_OFF_VALUE 4000          // value to not boot anymore
 #define VDD_CORRECTION_FACTOR 2.30  // factor to get real VDD voltage from measured value
+#define SLEEP_RECALCULATION_PERIOD_SECONDS 30
 
 #if DEBUG
 const bool DEBUG_FLAG = true;
@@ -117,6 +118,13 @@ const bool DEBUG_FLAG = false;
 #define FONT_SMALL u8g2_font_helvR08_tf
 #define FONT_INFO u8g2_font_7x14_tf
 #define FONT_VERSION u8g2_font_tom_thumb_4x6_tf
+
+typedef enum {
+   SYSTEM_RESET = 0,
+   BUTTON = 1,
+   MOTION = 2,
+   TIMER = 3,
+} wakeup_reason_t;
 
 struct wifiSettings {
    String bleSSID;  // Seconds to Sleep after update done
@@ -180,15 +188,21 @@ struct settings {
    bool clearscreen;  // if clear screen before update
    bool showBatteryWarning;
    bool showWifiWarning;
-} settings = {.timeout = 3600, .lut = "default", .clearscreen = true, .showBatteryWarning = true, .showWifiWarning = true};
+} settings = {.timeout = DEFAULT_SLEEP, .lut = "default", .clearscreen = true, .showBatteryWarning = true, .showWifiWarning = true};
 
 // system read data
 struct systemData {
+   wakeup_reason_t wakeupCause;
    int vddValue;
+   int sleepPrediction;
+   bool newSleepTimeSet;
    bool usbConnected;
    int deviceOrientation;
 } systemData = {
+    .wakeupCause = SYSTEM_RESET,
     .vddValue = 5000,
+    .sleepPrediction = DEFAULT_SLEEP,
+    .newSleepTimeSet = false,
     .usbConnected = true,
     .deviceOrientation = 0};
 
@@ -199,14 +213,16 @@ KXTJ3 myIMU(ACC_ADDR);                                                          
 esp32FOTA myEsp32FOTA("esp32-fota-http", SOFTWARE_VERSION);
 QRCode QR;
 WiFiClientSecure net = WiFiClientSecure();
-MQTTClient client(256);  // Buffer to 256 Byte
+MQTTClient client(512);  // Buffer to 256 Byte
 Preferences preferences;
 U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;
 Ticker onceTicker;
 Ticker perdiodicLed;
 Ticker perdiodicLedOff;
+Ticker periodicAccCheck;
 Ticker onceDisplay;
 SerialFlashFile saveFile;
+RTC_DATA_ATTR timeval previousWakeup = timeval{.tv_sec = 0, .tv_usec = 0};
 
 NimBLECharacteristic* wifiConnectedCharacteristic;
 NimBLEAdvertising* pAdvertising;
@@ -241,7 +257,8 @@ bool periodicLedIsOn = false;
 int periodicLedTimeout = 0;
 bool epaperIsUpdating = false;
 bool isTestMode = false;  // enabled if the device is in deployment and tests are running
-bool buttonWake = false;
+bool buttonWake = false;  // true if wakeup via reset button
+bool stopAccRecheck = false;
 
 void ledBlink(int timeout, bool on);
 bool awsConnect(bool connect);
@@ -268,12 +285,15 @@ void displayTurnOn();
 void displayUpdatePicture();
 void displayWifiActivate(bool wifiProvisioningDone);
 bool waitDisplayComplete(bool quick);
-int accInit();
+int accInit(bool skipInit = false);
 bool accIntSet(int sensity);
+void checkOrientationInBackground(int setOrientValue, bool isRunning = true);
 bool chargeMode(bool enable);
 bool usbInit();
 bool usbCheckConnect();
 void debugCheck();
+int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly = false);
+wakeup_reason_t getWakeupReason();
 
 void WiFiEvent(WiFiEvent_t event) {
    if (DEBUG_FLAG)
@@ -317,13 +337,13 @@ void timeoutFailsave(int time) {
 }
 
 void iotReceiveHandler(String& topic, String& payload) {
-   if (DEBUG_FLAG) Serial.print("[IOT RX] Message Received: ");
+   if (DEBUG_FLAG) Serial.print("[AWS RX] Message Received: ");
    if (DEBUG_FLAG) Serial.println(payload);
    JsonDocument doc;
    deserializeJson(doc, payload);
 
    if (doc["url"].is<JsonString>()) {
-      Serial.println("[IOT RX] Picture URL Message");
+      Serial.println("[AWS RX] Picture URL Message");
       const char* dlurl = doc["url"];
       sprintf(DL_URL, "%s%s", ENV_DOWNLOAD_URL, dlurl);
       isDlUrl = true;
@@ -332,7 +352,7 @@ void iotReceiveHandler(String& topic, String& payload) {
    if (doc["ota"].is<JsonString>()) {
       const char* otaUrlTemp = doc["ota"];
       size_t otaUrlLength = strlen(otaUrlTemp);
-      Serial.printf("[IOT RX] OTA URL received: '%s' (%d) \n", otaUrlTemp, otaUrlLength);
+      Serial.printf("[AWS RX] OTA URL received: '%s' (%d) \n", otaUrlTemp, otaUrlLength);
       if (otaUrlLength > 5) {
          myEsp32FOTA.setManifestURL(otaUrlTemp);
          bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
@@ -342,13 +362,13 @@ void iotReceiveHandler(String& topic, String& payload) {
             delay(200);
             displaySetText("Updating Software...", true, true);
             ledBlink(2000, true);
-            Serial.println("[MAIN] OTA via MQTT Started.....");
+            Serial.println("[OTA] OTA via MQTT Started.....");
             writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
             resetAll(false, false);
             myEsp32FOTA.execOTA();
             delay(2000);
          } else {
-            Serial.println("[MAIN] OTA URL is same Version - No OTA needed");
+            Serial.println("[OTA] OTA URL is same Version - No OTA needed");
          }
       }
    }
@@ -362,7 +382,7 @@ void iotReceiveHandler(String& topic, String& payload) {
       const char* activated;
       activated = doc["act"];
       if (strcmp(activated, "activated") == 0) {
-         Serial.println("[IOT RX] Device is activated");
+         Serial.println("[AWS RX] Device is activated");
          if (doc["key"].is<JsonString>()) {
             const char* devicekey = doc["key"];
             sprintf(CLIENT_KEY, "%s", devicekey);
@@ -391,11 +411,11 @@ void iotReceiveHandler(String& topic, String& payload) {
                settings.showBatteryWarning = false;
             }
          }
-         Serial.printf("[IOT RX] SETTINGS - Sleep: %d Lut: %s Overlay: %d-%d \n", settings.timeout, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
+         Serial.printf("[AWS RX] SETTINGS - Sleep: %d Lut: %s Overlay: %d-%d \n", settings.timeout, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
          deviceActivated = true;
       }
       if (strcmp(activated, "not_started") == 0) {
-         Serial.println("[IOT RX] Device activation not started");
+         Serial.println("[AWS RX] Device activation not started");
          deviceActivationNotStarted = true;
       }
       if (strcmp(activated, "reset") == 0) {
@@ -677,7 +697,6 @@ bool wifiSmart() {
          Serial.println("[NETWORK] Stop connect because no wifi set");
          break;
       }
-      // if (i == 0) WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
       WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
       WiFi.waitForConnectResult();
       if (WiFi.status() == WL_CONNECTED) {
@@ -685,23 +704,13 @@ bool wifiSmart() {
       }
       WiFi.disconnect(true);
       delay(1000);
-      // WiFi.setSleep(true);
-      /*
-      IPAddress primaryDNS(8, 8, 8, 8);    // optional
-      IPAddress secondaryDNS(1, 1, 1, 1);  // optional
-      if (!WiFi.config("", "", "", primaryDNS, secondaryDNS)) {
-         Serial.println("STA Failed to configure");
-      }
-      // WiFi.disconnect(true);*/
-      // WiFi.disconnect(true);
-      // delay(1000);
-      // WiFi.reconnect();
       if (!isWifi && i >= 3 && waitDisplayComplete(true)) {
          Serial.println("[NETWORK] stop search because default wifi");  // skip the intense connect if default wifi
          break;
       }
    }
-   if (isTestMode) return true;
+
+   if (isTestMode) return true;  // skip wifi activation in deployment
 
    wifiSettings.wifiQuality = WiFi.RSSI();
 
@@ -711,8 +720,6 @@ bool wifiSmart() {
    //  check if reset is triggered via button
    // if wifi was connected in the past (device is activated but no wifi)
    // restart bluetooth to set new wifi
-   bool testActivation = getActivatedFromMem();
-   Serial.printf("[DEBUG] Activation Test: %d Button: %d\n", testActivation, buttonWake);
 
    if (WiFi.status() != WL_CONNECTED) startupCounter(true);  // only reset startup counter if no wifi. otherwise wait longer
    if (WiFi.status() != WL_CONNECTED && getActivatedFromMem() && buttonWake == true) {
@@ -849,7 +856,7 @@ bool wifiSmart() {
       return true;
    }
    Serial.println("[NETWORK] WiFi Connect failed");
-   restoreSettingsToFlash(EEPROM_SETTINGS_ADR);
+   restoreSettingsToFlash(EEPROM_SETTINGS_ADR);  // restore settings that are in memory if no cloud data available
    settings.timeout = storeSleepTimeMem();
    if (getActivatedFromMem()) {
       if (reconnectCount < MAX_RECONNECTS) {
@@ -1255,7 +1262,7 @@ String urldecode(String str) {
 // get the state of the wifi connection lost state and also set it
 bool wifiConnectionLostStore(bool setNoWifi, bool reset) {
    int actualState = readIntFromFlash(200);
-   if (DEBUG_FLAG) Serial.printf("[MEM] Wifi Connection lost state: %d\n", actualState);
+   if (DEBUG_FLAG) Serial.printf("[MEM] Wifi Connection lost state stored: %d\n", actualState);
    if (reset) {
       if (actualState != 0) writeIntToFlash(0, 200);
       return false;
@@ -1293,6 +1300,7 @@ int storeSleepTimeMem(int updateTime) {
    int returnSleepTime = readIntFromFlash(210);
    if (updateTime > 0) {
       if (returnSleepTime != updateTime) {
+         systemData.newSleepTimeSet = true;
          if (DEBUG_FLAG) Serial.printf("[MEM] Update Sleep Time to %d\n", updateTime);
          writeIntToFlash(updateTime, 210);
       }
@@ -1415,19 +1423,19 @@ void displayOverlays(DisplayType& display, displayInfo displayData, bool invertC
    }
 }
 
-int loadImageFromWeb(String url) {
+int loadImageFromWeb(String url, String fileName) {
    if (url.length() < 1)
       return -2;
    Serial.print("[DL] Download Image file: ");
    Serial.println(url);
-   int setImage = 0;
+   // int setImage = 0;
    int downloadOk = 0;
    String newUrl = getRedirect(url);
    for (int i = 0; i <= 5; i++) {
       debugFS();
-      downloadOk = downloadAndSaveFile("tmp.gz", newUrl);
+      downloadOk = downloadAndSaveFile(fileName, newUrl);
       if (downloadOk == 0) {
-         break;
+         return 0;
       } else {
          if (WiFi.status() != WL_CONNECTED) {
             WiFi.disconnect(true);
@@ -1436,20 +1444,7 @@ int loadImageFromWeb(String url) {
          }
       }
    }
-   debugFS();
-   if (downloadOk == 0) {
-      setUpdateState("download_ok");  // also connects aws
-      Serial.println("[DL] Done");
-      waitDisplayComplete(false);
-      delay(50);
-      setImage = setImageFromFS("tmp.gz");
-   }
-   debugFS();
-
-   if (downloadOk == 0 && setImage == 0)
-      return 0;
-   else
-      return -1;
+   return -1;
 }
 
 bool getVersionUpdate(void) {
@@ -1480,6 +1475,7 @@ bool getVersionUpdate(void) {
 }
 
 int setImageFromFS(String fileName) {
+   epaperIsUpdating = true;
    saveFile = SerialFlash.open(fileName.c_str());
    if (!saveFile) {
       Serial.println("File missing");
@@ -1496,7 +1492,7 @@ int setImageFromFS(String fileName) {
 
    if (width > EPD_WIDTH || height > EPD_HEIGHT) {
       Serial.printf("[BMP] Image too wide or tall!");
-      return 1;
+      return -1;
    }
 
    // wipe if this setting is on
@@ -1632,6 +1628,7 @@ int setImageFromFS(String fileName) {
 #endif
    } while (display.nextPage());
    Serial.println("[EPD] End Draw...");
+   epaperIsUpdating = false;
    return 0;
 }
 void displayDebugInfo() {
@@ -1772,99 +1769,6 @@ void displayDebugInfo() {
 
    } while (display.nextPage());
 }
-/*
-void displayDebugInfo_alt() {
-   int textLines = 11;
-   String info[textLines];
-   if (deviceActivated || deviceActivationNotStarted || deviceActivationReset) {
-      info[0] = "AWS Connection: OK";
-   } else {
-      info[0] = "AWS Connection: FAIL";
-   }
-   String ssidRead = readStringFromFlash(0);
-   String pwRead = readStringFromFlash(40);
-   int wifiSignal = WiFi.RSSI();
-   systemData.vddValue = readVDD(false);
-   bool isUsb = usbCheckConnect();
-
-   info[1] = "";
-
-   info[2] = "Device Status:";
-   info[3] = "Activated: " + String(deviceActivated) + " NotStarted: " + String(deviceActivationNotStarted) + " Reset: " + String(deviceActivationReset);
-   info[4] = "OTA URL: " + String(OTA_URL);
-   info[5] = "DEV OTA URL: " + String(OTA_URL_DEV);
-   info[6] = "";
-
-   info[7] = "Flash:";
-   info[8] = "Activated: " + String(getActivatedFromMem()) + " ActCount: " + String(readIntFromFlash(170)) + " FileVers: " + String(readIntFromFlash(150));
-   info[9] = "SSID: " + ssidRead + " PW: " + pwRead;
-   info[10] = "LINK: " + String(wifiSignal) + " BAT: " + String(systemData.vddValue) + "V USB: " + String(isUsb);
-   Serial.println("[TEST] START");
-   for (int i = 0; i < textLines; i++) {
-      Serial.println(info[i]);
-   }
-   Serial.println("[TEST] END");
-   int foreGround = GxEPD_BLACK_I;
-   int backGround = GxEPD_WHITE_I;
-   display.init(115200);
-   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   do {
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, GxEPD_BLACK_I);
-      display.fillRect(2, 2, EPD_HEIGHT - 4, EPD_WIDTH - 4, GxEPD_WHITE_I);
-      display.fillRect(4, 4, EPD_HEIGHT - 8, EPD_WIDTH - 8, GxEPD_BLACK_I);
-      display.fillRect(8, 8, EPD_HEIGHT - 16, EPD_WIDTH - 16, GxEPD_WHITE_I);
-      int16_t tw = 0;
-
-      //        display.fillRect(EPD_HEIGHT - tw - 2, 592 + 1, tw + 3, 8, GxEPD_RED_I);
-
-      u8g2_for_adafruit_gfx.setFontDirection(0);             // left to right (this is default)
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-
-      u8g2_for_adafruit_gfx.setFont(FONT_MAIN);                    // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Deployment");       // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 50);  // start writing at this position
-      u8g2_for_adafruit_gfx.print("Deployment");
-
-      u8g2_for_adafruit_gfx.setFontMode(1);  // use u8g2 transparent mode (this is default)
-
-      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();   // positive
-      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();  // negative; in mathematicians view
-      int16_t th = ta - td;                                 // text box height
-      for (int i = 0; i < textLines; i++) {
-         switch (i) {
-            case 0:
-               u8g2_for_adafruit_gfx.setFont(FONT_BIG);
-               break;
-            case 4:
-               u8g2_for_adafruit_gfx.setFont(FONT_INFO);
-               break;
-            case 5:
-               u8g2_for_adafruit_gfx.setFont(FONT_INFO);
-               break;
-            default:
-               u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);  // extended font
-         }
-         tw = u8g2_for_adafruit_gfx.getUTF8Width(info[i].c_str());                // text box width
-         u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 120 + (i * 25));  // start writing at this position
-         u8g2_for_adafruit_gfx.print(info[i]);
-      }
-
-      displayInfo displayInfoDebug;
-
-      displayInfoDebug.version = true;
-      displayInfoDebug.batteryInfo = true;
-      displayInfoDebug.batteryLowBig = false;
-      displayInfoDebug.wifiSignal = true;
-      displayInfoDebug.deviceInfoString = true;
-
-      displayOverlays(display, displayInfoDebug, false);
-
-   } while (display.nextPage());
-}
-*/
 void displaySetText(String info, bool isBlackboard, bool quickRefresh) {
    int foreGround = GxEPD_BLACK_I;
    int backGround = GxEPD_WHITE_I;
@@ -1922,6 +1826,65 @@ void displaySetText(String info, bool isBlackboard, bool quickRefresh) {
       }
 
       displayOverlays(display, displayInfos, invert, fullcolor);
+
+   } while (display.nextPage());
+}
+
+void displayOtaScreen() {
+   Serial.print(F("[EPD] OTA Screen loading - \n"));
+
+   int foreGround = GxEPD_WHITE_I;
+   int backGround = GxEPD_BLACK_I;
+   bool fullColor = false;
+
+   if (displaySettings.quickRefresh) {
+      display.init(115200);
+      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
+   } else {
+      display.enableQuickRefresh(0, false);
+      display.init(115200);
+      foreGround = GxEPD_WHITE;
+      backGround = GxEPD_BLACK;
+      fullColor = true;
+   }
+   display.setRotation(displaySettings.rotationText);
+   display.firstPage();
+   // Display 600*448
+   do {
+      u8g2_for_adafruit_gfx.setFontDirection(0);  // left to right (this is default)
+      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, backGround);
+      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
+      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
+      u8g2_for_adafruit_gfx.setFontMode(1);                  // use u8g2 transparent mode (this is default)
+
+      u8g2_for_adafruit_gfx.setFont(FONT_MAIN);  // extended font
+      int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width("Software Update...");
+      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 190);  // start writing at this position
+      u8g2_for_adafruit_gfx.print("Software Update...");
+
+      u8g2_for_adafruit_gfx.setFont(FONT_BIG);                                         // extended font
+      tw = u8g2_for_adafruit_gfx.getUTF8Width("Bitte schalte den Rahmen nicht aus.");  // text box width
+      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();                              // positive
+      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();                             // negative; in mathematicians view
+      int16_t th = ta - td;                                                            // text box height
+      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, (EPD_WIDTH - th) / 2);    // start writing at this position
+      u8g2_for_adafruit_gfx.print("Bitte schalte den Rahmen nicht aus.");
+
+      tw = u8g2_for_adafruit_gfx.getUTF8Width("Das Update dauert etwa 45 Sekunden.");       // text box width
+      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) + 19);  // start writing at this position
+      u8g2_for_adafruit_gfx.print("Das Update dauert etwa 45 Sekunden.");
+
+      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                    // extended font
+      tw = u8g2_for_adafruit_gfx.getUTF8Width("Updating Software");  // text box width
+      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);   // start writing at this position
+      u8g2_for_adafruit_gfx.print("Updating Software");
+
+      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                                                         // extended font
+      tw = u8g2_for_adafruit_gfx.getUTF8Width("Please dont turn off the device. The Update takes approx. 45 seconds.");  // text box width
+      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                                                       // start writing at this position
+      u8g2_for_adafruit_gfx.print("Please dont turn off the device. The Update takes approx. 45 seconds.");              // UTF-8 string: "<" 550 448 664 ">"
+
+      displayOverlays(display, displayInfos, true, fullColor);
 
    } while (display.nextPage());
 }
@@ -2364,7 +2327,7 @@ bool awsConnect(bool connect) {
    myFile2.close();
 
    if (keyString.length() < 10 || crtString.length() < 10) {
-      Serial.println("[IOT] Error: Certs not found");
+      Serial.println("[AWS] Error: Certs not found");
       displaySetText("Error: Certificates not found", false);
       return false;
    }
@@ -2380,13 +2343,15 @@ bool awsConnect(bool connect) {
    while (!client.connect(CLIENT_ID)) {
       counter++;
       Serial.print("*");
-      delay(500);
-      if (counter > 8) {
+      client.loop();
+      delay(300);
+      if (counter > 20) {
          return false;
       }
    }
    sprintf(TOPIC_RECEIVE, "$aws/things/%s/epaper/receive", CLIENT_ID);
    client.subscribe(TOPIC_RECEIVE);
+   client.loop();
    Serial.println("[AWS] CONNECTED");
    return true;
 }
@@ -2399,12 +2364,13 @@ bool setUpdateState(String state) {
    int counter = 0;
    while (counter < 5) {
       awsConnect(true);
-      if (client.publish(TOPIC_SEND, payload, false, 1))  // Publish the message(Temp and humidity)
+      if (client.publish(TOPIC_SEND, payload, false, 0))  // Publish the message(Temp and humidity)
       {
-         Serial.printf("[IOT] Set State to: %s \n", state.c_str());
+         Serial.printf("[AWS] Set State to: %s \n", state.c_str());
+         client.loop();
          return true;
       } else {
-         Serial.println("[IOT] Set State Error!");
+         Serial.println("[AWS] Set State Error!");
       }
       counter++;
       delay(1000);
@@ -2414,7 +2380,7 @@ bool setUpdateState(String state) {
 
 bool deactivateDevice() {
    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("[IOT] Deactivate failed: WiFi not connected");
+      Serial.println("[AWS] Deactivate failed: WiFi not connected");
       return false;
    }
    char TOPIC_ACTIVATE[64];
@@ -2432,11 +2398,12 @@ bool deactivateDevice() {
    int counter = 0;
    while (counter < 5 && deviceActivationReset == false) {
       awsConnect(true);
-      if (client.publish(TOPIC_ACTIVATE, payload, false, 1))  // Publish the message(Temp and humidity)
+      if (client.publish(TOPIC_ACTIVATE, payload, false, 0))  // Publish the message(Temp and humidity)
       {
-         Serial.println("[IOT] Request Remove Device");
+         Serial.println("[AWS] Request Remove Device");
+         client.loop();
       } else {
-         Serial.println("[IOT] Request Remove Device FAILED");
+         Serial.println("[AWS] Request Remove Device FAILED");
       }
       int counter2 = 0;
       while (counter2 < 50 && deviceActivationReset == false) {
@@ -2460,7 +2427,7 @@ bool deployDevice() {
    int fileCount = 0;
    while (file) {
       fileCount++;
-      Serial.print("[MAIN] FILE: ");
+      Serial.print("[MAIN] CERT FILE: ");
       Serial.println(file.name());
 
       file = root.openNextFile();
@@ -2468,7 +2435,7 @@ bool deployDevice() {
    root.close();
    file.close();
    if (fileCount < 2) {
-      Serial.println("[IOT] Error: Certs not found");
+      Serial.println("[AWS] Error: Certs not found");
       displaySetText("Error: Certificates not found", false);
       return false;
    }
@@ -2491,10 +2458,11 @@ bool deployDevice() {
       int counter = 0;
       while (counter < 5 && deviceActivationReset == false) {
          awsConnect(true);
-         if (client.publish(TOPIC_ACTIVATE, payload, false, 1)) {
-            Serial.println("[IOT] Request Remove Device");
+         if (client.publish(TOPIC_ACTIVATE, payload, false, 0)) {
+            Serial.println("[AWS] Request Remove Device");
+            client.loop();
          } else {
-            Serial.println("[IOT] Request Remove Device FAILED");
+            Serial.println("[AWS] Request Remove Device FAILED");
          }
          int counter2 = 0;
          while (counter2 < 50 && deviceActivationReset == false) {
@@ -2506,21 +2474,21 @@ bool deployDevice() {
       }
    }
    int oldVersion = readIntFromFlash(150);
-   int sleepTime = storeSleepTimeMem();  // right now only used for api. could be used to use set sleep time on other places
+   int sleepTime = storeSleepTimeMem();
+   int predictedSleepTime = calculateSleepDuration(sleepTime, false, true);
 
-   sprintf(payload, "{\"act\": 1,\"v\": \"%s\",\"file\": \"%d\",\"bat\": \"%d\",\"wake\": \"%d, %d\",\"wifi\": \"%d, %d\",\"usb\": \"%d\",\"orient\": \"%d\",\"timeout\": \"%d\"}", SOFTWARE_VERSION, oldVersion, systemData.vddValue, rtc_get_reset_reason(0), rtc_get_reset_reason(1), wifiSettings.wifiRetries, wifiSettings.wifiQuality, systemData.usbConnected, systemData.deviceOrientation, sleepTime);  // Create the payload for publishing
+   sprintf(payload, "{\"act\": 1,\"v\": \"%s\",\"file\": \"%d\",\"bat\": \"%d\",\"wake\": \"%d\",\"wifi\": \"%d, %d\",\"usb\": \"%d\",\"orient\": \"%d\",\"timeout\": \"%d\",\"timeoutPredict\": \"%d\"}", SOFTWARE_VERSION, oldVersion, systemData.vddValue, systemData.wakeupCause, wifiSettings.wifiRetries, wifiSettings.wifiQuality, systemData.usbConnected, systemData.deviceOrientation, sleepTime, predictedSleepTime);  // Create the payload for publishing
    int counter = 0;
    while (counter < 7 && deviceActivated == false && deviceActivationNotStarted == false) {
       awsConnect(true);
-      if (client.publish(TOPIC_ACTIVATE, payload, false, 1)) {
-         Serial.println("[IOT] Request Activation");
+      if (client.publish(TOPIC_ACTIVATE, payload)) {
+         Serial.println("[AWS] Request Activation");
          client.loop();
       } else {
-         Serial.println("[IOT] Request Activation FAILED");
-         client.loop();
+         Serial.println("[AWS] Request Activation FAILED");
       }
       int counter2 = 0;
-      while (counter2 < 50 && deviceActivated == false && deviceActivationNotStarted == false && !isDlUrl) {
+      while (counter2 < 100 && deviceActivated == false && deviceActivationNotStarted == false && !isDlUrl) {
          counter2++;
          client.loop();
          vTaskDelay(50);
@@ -2566,9 +2534,9 @@ bool getImageUrl(bool reset) {
          awsConnect(true);
          if (client.publish(TOPIC_SEND, payload, false, 0))  // Publish the message(Temp and humidity)
          {
-            Serial.println("[IOT] Request Image URL");
+            Serial.println("[AWS] Request Image URL");
          } else {
-            Serial.println("[IOT] Request Image URL FAILED");
+            Serial.println("[AWS] Request Image URL FAILED");
          }
          int counter2 = 0;
          while (counter2 < 15 && !isDlUrl) {
@@ -2588,8 +2556,12 @@ bool getImageUrl(bool reset) {
 // sleep x seconds
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
+   checkOrientationInBackground(0, false);
    WiFi.disconnect(true);
-   accIntSet(80);  // Set acc int wakeup
+   accIntSet(80);  // Set acc int wakeup /TODO: disable if no motion wakeup
+   // struct timeval currentTime;
+   // gettimeofday(&currentTime, NULL);
+   // previousWakeup = currentTime;  // this is important for next wakeup calculation, do not delete it.
    waitDisplayComplete(false);
    if (wakeuptimeout <= 0 && showScreen) {
       displayTurnOn();  // Ich schlafe screen
@@ -2643,12 +2615,92 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
       rtc_gpio_pulldown_en(GPIO_NUM_0);
       rtc_gpio_pullup_dis(GPIO_NUM_0);
    }
-
    esp_deep_sleep_start();
-   //   setCpuFrequencyMhz(240);
-   wakeup_reason = esp_sleep_get_wakeup_cause();
-   Serial.printf("[MAIN] Wakeup Reason from Sleep: %d\n", wakeup_reason);
-   ESP.restart();
+   ESP.restart();  // will never reach in deep sleep
+}
+
+int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly) {
+   struct timeval now;
+   gettimeofday(&now, NULL);
+
+   if (getDataOnly) {
+      time_t diff = now.tv_sec - previousWakeup.tv_sec;
+      int predictedSleep = defaultTimeout - diff;
+      if (predictedSleep < SLEEP_RECALCULATION_PERIOD_SECONDS || predictedSleep <= 0) {
+         predictedSleep = defaultTimeout;
+      }
+      Serial.printf("[SLEEP] Return predicted sleep data only: %d \n", predictedSleep);
+
+      return predictedSleep;
+   }
+
+   if (systemData.wakeupCause == wakeup_reason_t::TIMER) {
+      if (DEBUG_FLAG) Serial.printf("[SLEEP] no manual wakeup (timer) - using full wakeup period...\n");
+      previousWakeup = now;
+      return defaultTimeout;
+   }
+   if (systemData.wakeupCause == wakeup_reason_t::BUTTON) {
+      // TODO: cloud time feedback is needed here to calculate new wakeup
+      if (DEBUG_FLAG) Serial.printf("[SLEEP] button wakeup - not able to calculate new sleep internally...\n");
+      previousWakeup = now;
+      return defaultTimeout;
+   }
+   if (forceReset) {
+      if (DEBUG_FLAG) Serial.printf("[SLEEP] force reset - using full wakeup period...\n");
+      previousWakeup = now;
+      return defaultTimeout;
+   }
+
+   if (previousWakeup.tv_sec > now.tv_sec) {
+      if (DEBUG_FLAG) Serial.printf("[SLEEP] detected invalid previous wakeup, resetting...\n");
+      previousWakeup = timeval{
+          .tv_sec = 0,
+          .tv_usec = 0};
+   }
+
+   time_t diff = now.tv_sec - previousWakeup.tv_sec;
+
+   if (diff <= 0) {
+      if (DEBUG_FLAG) Serial.printf("[SLEEP] detected non positive sleep difference, resetting...\n");
+      previousWakeup = now;
+      diff = 0;
+   }
+
+   Serial.printf("[SLEEP] current time: %lld, previous time: %lld, difference: %lld\n", now.tv_sec, previousWakeup.tv_sec, diff);
+   int predictedSleep = defaultTimeout - diff;
+   // if the user refreshes less than one minute before the actual refresh will occur, skip that next refresh and use the current one instead.
+   if (predictedSleep < SLEEP_RECALCULATION_PERIOD_SECONDS || predictedSleep <= 0) {
+      Serial.printf("[SLEEP] manual reset within %d seconds of wakeup window. Reset to full window next\n", SLEEP_RECALCULATION_PERIOD_SECONDS);
+      previousWakeup = now;
+      return defaultTimeout;
+   }
+
+   return predictedSleep;
+}
+
+wakeup_reason_t getWakeupReason() {
+   int resetReason0 = rtc_get_reset_reason(0);
+   int resetReason1 = rtc_get_reset_reason(1);
+   int wakeupReason = esp_sleep_get_wakeup_cause();
+#if DEBUG
+   Serial.printf("[WAKE] Reset Reason 0: %d\n", resetReason0);
+   Serial.printf("[WAKE] Reset Reason 1: %d\n", resetReason1);
+   Serial.printf("[WAKE] Wake Reason: %d\n", wakeupReason);
+#endif
+   if (wakeupReason == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_UNDEFINED && resetReason0 == 1 && resetReason1 == 1) {
+      Serial.printf("[WAKE] Got Button Wakeup or Power Loss Wakeup\n");
+      return wakeup_reason_t::BUTTON;
+   }
+   if (wakeupReason == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_EXT1) {
+      Serial.printf("[WAKE] Got Motion Wakeup\n");
+      return wakeup_reason_t::MOTION;
+   }
+   if (wakeupReason == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_TIMER) {
+      Serial.printf("[WAKE] Got Timer Wakeup \n");
+      return wakeup_reason_t::TIMER;
+   }
+   Serial.printf("[WAKE] Got Button System Reset or Others\n");
+   return wakeup_reason_t::SYSTEM_RESET;
 }
 
 int startupCounter(bool reset) {
@@ -2660,21 +2712,6 @@ int startupCounter(bool reset) {
       counter = 0;
       Serial.println("[MAIN] Startup Counter RESET");
    }
-#if DEBUG
-   // 1 14 = button wakeup, // 5 14 = timed sleep wakeup,
-   Serial.printf("[MAIN] Reset Reason 0: %d\n", rtc_get_reset_reason(0));
-   Serial.printf("[MAIN] Reset Reason 1: %d\n", rtc_get_reset_reason(1));
-#endif
-   // internal reset
-   if (rtc_get_reset_reason(0) != 1 || rtc_get_reset_reason(1) != 1) {
-      StartCounter = 0;
-      counter = 0;
-   }
-   if (rtc_get_reset_reason(0) == 1 && rtc_get_reset_reason(1) == 1) {
-      Serial.printf("[MAIN] Wake via Button \n");
-      buttonWake = true;
-   }
-
    preferences.putUInt("counter", counter);
    preferences.end();
    return counter;
@@ -2683,11 +2720,12 @@ int startupCounter(bool reset) {
 bool resetAll(bool resetActivation, bool resetWifi) {
    Serial.printf("[MAIN] Reset - ACT %d | WIFI %d \n", resetActivation, resetWifi);
 
+   writeIntToFlash(0, 220);               // restore screen orient to default
    writeIntToFlash(0, 150);               // Reset picture version after ota to init update
    writeIntToFlash(0, 140);               // reset reconnect count
    setActivatedToMem(false);              // reset activation writeIntToFlash(0, 160);
    wifiConnectionLostStore(false, true);  // reset wifi lost flag
-
+   storeSleepTimeMem(DEFAULT_SLEEP);      // restore sleep mem store to default
    if (resetWifi) {
       writeStringToFlash("", 0);   // storing ssid at address 0
       writeStringToFlash("", 40);  // storing pss at address 40
@@ -2710,28 +2748,24 @@ bool resetAll(bool resetActivation, bool resetWifi) {
          displayWipe(false);
       }
       // Send disable cloud querry
+      settings.clearscreen = true;
+      settings.showBatteryWarning = true;
+      settings.showWifiWarning = true;
+      saveSettingsToFlash(EEPROM_SETTINGS_ADR);
       gotToDeepSleep(0, true, false);
    }
    return true;
 }
 
 void debugCheck() {
-   if (wifiSettings.isDeployWifi || isTestMode) {
-      // if button wake
-      if (rtc_get_reset_reason(0) == 1 && rtc_get_reset_reason(1) == 1) {
-         Serial.println("[DEBUG] Deploy State");
-         resetAll(false, true);
-         waitDisplayComplete(false);
-         displaySettings.quickRefresh = true;
-         displayDebugInfo();
-         delay(2000);
-         gotToDeepSleep(300, false, false);  // dont show the deep sleep screen stay with debug info
-      } else {
-         Serial.println("[DEBUG] Deploy Sleep");
-         gotToDeepSleep(0, false, false);
-      }
-      return;
-   }
+   Serial.println("[DEBUG] Deploy State");
+   resetAll(false, true);
+   waitDisplayComplete(false);
+   displaySettings.quickRefresh = true;
+   displayDebugInfo();
+   delay(2000);
+   gotToDeepSleep(DEFAULT_SLEEP, false, false);  // dont show the deep sleep screen stay with debug info
+   return;
 }
 
 // test if a byte is set via serial to enter deploy mode
@@ -2791,29 +2825,30 @@ bool usbCheckConnect() {
    }
 }
 
-int accInit() {
+int accInit(bool skipInit) {
    int orientation = 0;
-   if (myIMU.begin(6.25, 2, false) == IMU_SUCCESS) {
-      if (DEBUG_FLAG) Serial.println("[ACC] initialized.");
-   } else {
-      Serial.println("[ACC] Failed to initialize.");
-      return -1;
-      // while (true);  // stop running sketch if failed
-   }
+   if (!skipInit) {
+      if (myIMU.begin(6.25, 2, false) == IMU_SUCCESS) {
+         if (DEBUG_FLAG) Serial.println("[ACC] initialized.");
+      } else {
+         Serial.println("[ACC] Failed to initialize.");
+         return -1;
+         // while (true);  // stop running sketch if failed
+      }
 
-   uint8_t readData = 0;
+      uint8_t readData = 0;
 
 // Get the ID:
 #if DEBUG
-   if (myIMU.readRegister(&readData, KXTJ3_WHO_AM_I) ==
-       IMU_SUCCESS) {
-   } else {
-      Serial.println("[ACC] Communication error, stopping.");
-      return -1;
-      // while (true);  // stop running sketch if failed
-   }
+      if (myIMU.readRegister(&readData, KXTJ3_WHO_AM_I) ==
+          IMU_SUCCESS) {
+      } else {
+         Serial.println("[ACC] Communication error, stopping.");
+         return -1;
+         // while (true);  // stop running sketch if failed
+      }
 #endif
-
+   }
    myIMU.standby(false);
 
    uint8_t dataLowRes = 0;
@@ -2869,6 +2904,44 @@ bool accIntSet(int sensity) {
    myIMU.intConf(sensity, 3, 10, HIGH, -1, true, false, true, false, true);
    delay(1);
    return true;
+}
+
+void recheckAccOrient(int setOrientValue) {
+   if (stopAccRecheck) return;
+   int accCheck = accInit(true);
+   if (accCheck != readIntFromFlash(220)) {
+      systemData.deviceOrientation = accCheck;
+      Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
+      writeIntToFlash(systemData.deviceOrientation, 220);
+      writeIntToFlash(0, 150);  // Reset picture version after ota to init update
+      if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
+         displaySettings.rotationText = 1;
+         displaySettings.rotationPicture = 0;
+      }
+      if (epaperIsUpdating) {
+         digitalWrite(RST_PIN, 1);
+         delay(50);  // needs a little longer
+         digitalWrite(RST_PIN, 0);
+         delay(20);
+
+         ESP.restart();
+      }
+   } else {
+      if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck\n");
+   }
+}
+
+void checkOrientationInBackground(int setOrientValue, bool isRunning) {
+   if (isRunning) {
+      stopAccRecheck = false;
+      periodicAccCheck.attach_ms(1000, recheckAccOrient, setOrientValue);
+   } else {
+      stopAccRecheck = true;
+      onceTicker.detach();
+      return;
+   }
+
+   return;
 }
 
 bool chargeMode(bool enable) {
@@ -2935,27 +3008,29 @@ void test() {
    Serial.println("[DEBUG] Test Function");
    startupCounter(true);
    // displaySettings.displayQuickRefreshTime = 2900;//works cold
+   ledBlink(200, false);
+   bool wifiConnected = wifiSmart();  // Replaces wifi begin
+   delay(1000);
 
-   restoreSettingsToFlash(EEPROM_SETTINGS_ADR);
+   awsConnect(true);
 
-   settings.clearscreen = true;
-   settings.showBatteryWarning = false;
-   settings.showWifiWarning = false;
-   Serial.printf("[MEM] Settings - ClearScreen: %d BatteryWarning: %d WifiWarning: %d \n", settings.clearscreen, settings.showBatteryWarning, settings.showWifiWarning);
+   char TOPIC_ACTIVATE[64];
+   char payload[256];
 
-   saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+   sprintf(TOPIC_ACTIVATE, "$aws/things/%s/activateepaper", CLIENT_ID);
+   sprintf(payload, "{\"test\": 111}");  // Create the payload for publishing
 
-   settings.clearscreen = true;
-   settings.showBatteryWarning = true;
-   settings.showWifiWarning = true;
-   Serial.printf("[MEM] Settings - ClearScreen: %d BatteryWarning: %d WifiWarning: %d \n", settings.clearscreen, settings.showBatteryWarning, settings.showWifiWarning);
-
-   restoreSettingsToFlash(EEPROM_SETTINGS_ADR);
+   client.publish(TOPIC_ACTIVATE, payload, false, 0);
 
    while (true) {
-      delay(5000);
+      delay(100);
+      client.loop();
    }
 
+   int timeout;
+   timeout = calculateSleepDuration(DEFAULT_SLEEP, false, false);
+   Serial.printf("time to next update: %d\n", timeout);
+   gotToDeepSleep(60, false, true);
    while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
@@ -2979,8 +3054,15 @@ void setup() {
       digitalWrite(LED_PIN, HIGH);
       gotToDeepSleep(86000, false, false);
    }
+   systemData.wakeupCause = getWakeupReason();
+   if (systemData.wakeupCause == wakeup_reason_t::BUTTON) {
+      buttonWake = true;
+      StartCounter = startupCounter(false);
 
-   StartCounter = startupCounter(false);
+   } else {
+      // reset startup counter if no button
+      StartCounter = startupCounter(true);
+   }
    EepromInit(EEPROM_SIZE);
 
    pinMode(12, INPUT);  // USB TEST PINS
@@ -3016,7 +3098,8 @@ void setup() {
    if (!systemData.usbConnected && systemData.vddValue < BAT_LOW_VALUE) displayInfos.batteryLowBig = true;  // enable bat low display if needed
    WiFi.onEvent(WiFiEvent);
    SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN);  // SCK(), MISO(),MOSI(), SS()
-   SerialFlash.begin(CS_FLASH_PIN);         // proceed even if begin() fails
+   SPI.setFrequency(20000000);
+   SerialFlash.begin(CS_FLASH_PIN);  // proceed even if begin() fails
    u8g2_for_adafruit_gfx.begin(display);
 
    setDeviceUid();
@@ -3073,43 +3156,30 @@ void setup() {
       displaySettings.quickRefresh = true;
       waitDisplayComplete(false);
       delay(200);
-      displaySetText("Updating Software...", true, true);
+      displayOtaScreen();
       ledBlink(2000, true);
-      Serial.println("[MAIN] OTA Started.....");
+      Serial.println("[OTA] OTA Started.....");
       writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
       resetAll(false, false);
       myEsp32FOTA.execOTA();
       delay(2000);
    } else {
-      Serial.println("[MAIN] no OTA needed");
+      Serial.println("[OTA] no OTA needed");
    }
 #endif
-
-   if (systemData.deviceOrientation != readIntFromFlash(220)) {
-      int accCheck = accInit();
-      if (accCheck != readIntFromFlash(220)) {
-         systemData.deviceOrientation = accCheck;
-         Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
-         writeIntToFlash(systemData.deviceOrientation, 220);
-         writeIntToFlash(0, 150);  // Reset picture version after ota to init update
-         if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
-            displaySettings.rotationText = 1;
-            displaySettings.rotationPicture = 0;
-         }
-      } else {
-         if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck 2\n");
-      }
-   } else {
-      if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck 1\n");
-   }
 
    startupCounter(true);
    bool activationDone = deployDevice();
    saveSettingsToFlash(EEPROM_SETTINGS_ADR);
-   if (!getActivatedFromMem()) {
-      debugCheck();
-      //  TODO reset if device is still found activated on first wifi connect and not pending
+   if (!getActivatedFromMem() && isTestMode) {
+      if (systemData.wakeupCause == wakeup_reason_t::BUTTON) {
+         debugCheck();
+      } else {
+         gotToDeepSleep(0, false, false);
+      }
    }
+   //  TODO reset if device is still found activated on first wifi connect and not pending
+
    if (!activationDone) {
       // only enter here if server activation not done or activation on server is confirmed reset state
       Serial.printf("[MAIN] ACT MEM: %d\n", getActivatedFromMem());
@@ -3153,34 +3223,37 @@ void setup() {
    writeIntToFlash(0, 170);  // reset activation sleep counter if activated
    setActivatedToMem(true);
    storeSleepTimeMem(settings.timeout);
+   systemData.sleepPrediction = calculateSleepDuration(settings.timeout, systemData.newSleepTimeSet, false);
+
    // TODO: Force Update after wifi screen if just one connection loss and then back
    // Set EEPROM on wifi screen and read here. If true and picture version is not 0 then update
    bool isUpdate = getVersionUpdate();
    if (!isUpdate) {
       if (newVersionSave <= 0) {
-         setUpdateState("update_checked_nopicture");
+         if (DEBUG_FLAG) setUpdateState("update_checked_nopicture");
          displayNoPicture();
       } else {
-         setUpdateState("update_checked_noupdate");
+         if (DEBUG_FLAG) setUpdateState("update_checked_noupdate");
       }
       delay(10);
       // WiFi.disconnect(true);
       //  WiFi.setSleep(true);
       if (settings.timeout > 0) {
-         gotToDeepSleep(settings.timeout);  // Disable version Check here
+         gotToDeepSleep(systemData.sleepPrediction);  // Disable version Check here
 
       } else {
          gotToDeepSleep(DEFAULT_SLEEP);
       }
    }
-   updateDisplayAsync("updatepicture");  // TODO: maybe remove
+   checkOrientationInBackground(systemData.deviceOrientation, true);
+   // updateDisplayAsync("updatepicture");  // TODO: maybe remove
 
    if (SPIFFS.usedBytes() > 10000) {
       Serial.println("[MEM] SPIFFS seems to full ...");
    }
 
    bool success = getImageUrl(false);
-   awsConnect(false);
+   // awsConnect(false);
    esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
    delay(10);
 }
@@ -3190,8 +3263,17 @@ void loop() {
       if (WiFi.status() == WL_CONNECTED) {
          downloadStart = false;
          delay(200);
-         int success = loadImageFromWeb(DL_URL);
-         if (success == 0) {
+         String fileName = "tmp.gz";
+         int dlSuccess = loadImageFromWeb(DL_URL, fileName);
+         if (DEBUG_FLAG) setUpdateState("download_ok");  // also connects aws
+         Serial.println("[DL] Done");
+         debugFS();
+         WiFi.setSleep(true);
+         waitDisplayComplete(false);
+         delay(25);
+         int setSuccess = setImageFromFS(fileName);
+         debugFS();
+         if (dlSuccess == 0 && setSuccess == 0) {
             setUpdateState("update_ok");
             writeIntToFlash(newVersionSave, 150);
          } else {
@@ -3222,7 +3304,7 @@ void loop() {
       // Picture Update Done
       Serial.println("[MAIN] End of Update");
       if (settings.timeout > 0) {
-         gotToDeepSleep(settings.timeout);
+         gotToDeepSleep(systemData.sleepPrediction);
       } else {
          gotToDeepSleep(DEFAULT_SLEEP);
       }

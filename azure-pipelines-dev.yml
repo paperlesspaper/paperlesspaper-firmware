@@ -42,7 +42,6 @@ steps:
       sed -i -e "s/X.X.X/$newversion/g" $(Pipeline.Workspace)/build/deploy/espfota.json
       sed -i -e "s/firmware.bin/firmware_epd7_dev.bin/g" $(Pipeline.Workspace)/build/deploy/espfota.json
       pio pkg install
-      cp -r ./deploy/.pio ./
       pio run
       if [ ! -f "./.pio/build/ESP32-C6-DevKitM-1/firmware.bin" ]; then
         echo "##[error]Build failed: firmware.bin was not created."
