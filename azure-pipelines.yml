@@ -36,10 +36,12 @@ steps:
       ln -s ~/.platformio/penv/bin/piodebuggdb /usr/local/bin/piodebuggdb
       sed -i -e "s/0\.0\.0/$(Build.BuildNumber)/g" $(Pipeline.Workspace)/build/src/main.cpp
       sed -i -e "s/#define DEBUG 1/#define DEBUG 0/g" $(Pipeline.Workspace)/build/src/main.cpp
+      cp $(Pipeline.Workspace)/build/deploy/espfota.json $(Pipeline.Workspace)/build/deploy/espfota_pre.json
       sed -i -e "s/X.X.X/$(Build.BuildNumber)/g" $(Pipeline.Workspace)/build/deploy/espfota.json
       sed -i -e "s/firmware.bin/firmware_epd7.bin/g" $(Pipeline.Workspace)/build/deploy/espfota.json
+      sed -i -e "s/X.X.X/$(Build.BuildNumber)/g" $(Pipeline.Workspace)/build/deploy/espfota_pre.json
+      sed -i -e "s/firmware.bin/firmware_epd7_pre.bin/g" $(Pipeline.Workspace)/build/deploy/espfota_pre.json
       pio pkg install
-      cp -r ./deploy/.pio ./
       pio run
       if [ ! -f "./.pio/build/ESP32-C6-DevKitM-1/firmware.bin" ]; then
         echo "##[error]Build failed: firmware.bin was not created."
@@ -48,6 +50,8 @@ steps:
       mkdir artifact
       cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_epd7.bin
       cp ./deploy/espfota.json ./artifact/espfota_epd7.json
+      cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_epd7_pre.bin
+      cp ./deploy/espfota_pre.json ./artifact/espfota_epd7_pre.json
   - task: PublishPipelineArtifact@1
     inputs:
       targetPath: "$(Pipeline.Workspace)/build/artifact/"
