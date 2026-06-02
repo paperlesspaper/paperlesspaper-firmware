@@ -8,6 +8,7 @@
 #include <MQTT.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+// #include <SD_MMC.h>
 #include <SPI.h>
 #include <SerialFlash.h>
 #include <U8g2_for_Adafruit_GFX.h>
@@ -188,7 +189,8 @@ struct settings {
    bool clearscreen;  // if clear screen before update
    bool showBatteryWarning;
    bool showWifiWarning;
-} settings = {.timeout = DEFAULT_SLEEP, .lut = "default", .clearscreen = true, .showBatteryWarning = true, .showWifiWarning = true};
+   bool sleepDisabled;
+} settings = {.timeout = DEFAULT_SLEEP, .lut = "default", .clearscreen = true, .showBatteryWarning = true, .showWifiWarning = true, .sleepDisabled = false};
 
 // system read data
 struct systemData {
@@ -216,11 +218,12 @@ WiFiClientSecure net = WiFiClientSecure();
 MQTTClient client(512);  // Buffer to 256 Byte
 Preferences preferences;
 U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;
-Ticker onceTicker;
+Ticker tickerFailsave;
 Ticker perdiodicLed;
 Ticker perdiodicLedOff;
 Ticker periodicAccCheck;
 Ticker onceDisplay;
+Ticker tickerStatupCounter;
 SerialFlashFile saveFile;
 RTC_DATA_ATTR timeval previousWakeup = timeval{.tv_sec = 0, .tv_usec = 0};
 
@@ -259,11 +262,12 @@ bool epaperIsUpdating = false;
 bool isTestMode = false;  // enabled if the device is in deployment and tests are running
 bool buttonWake = false;  // true if wakeup via reset button
 bool stopAccRecheck = false;
+bool isOrientUpdate = false;
 
 void ledBlink(int timeout, bool on);
 bool awsConnect(bool connect);
 bool getVersionUpdate(void);
-int startupCounter(bool reset);
+void startupCounter(int reset);
 bool resetAll(bool resetActivation, bool resetWifi);
 bool wifiConnectionLostStore(bool setNoWifi = false, bool reset = false);
 bool getActivatedFromMem(void);
@@ -401,6 +405,9 @@ void iotReceiveHandler(String& topic, String& payload) {
          if (doc["clearscreen"].is<bool>()) {
             settings.clearscreen = doc["clearscreen"].as<bool>();
          }
+         if (doc["sleepdisabled"].is<bool>()) {
+            settings.sleepDisabled = doc["sleepdisabled"].as<bool>();
+         }
          if (doc["overlay"].is<bool>()) {
             bool showOverlay = doc["overlay"].as<bool>();
             if (showOverlay) {
@@ -411,7 +418,7 @@ void iotReceiveHandler(String& topic, String& payload) {
                settings.showBatteryWarning = false;
             }
          }
-         Serial.printf("[AWS RX] SETTINGS - Sleep: %d Lut: %s Overlay: %d-%d \n", settings.timeout, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
+         Serial.printf("[AWS RX] SETTINGS - Sleep: %d (disable:%d) Lut: %s Overlay: %d-%d \n", settings.timeout, settings.sleepDisabled, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
          deviceActivated = true;
       }
       if (strcmp(activated, "not_started") == 0) {
@@ -534,13 +541,14 @@ int readVDD(bool singleReading) {
    delay(3);
    int retries = 1;
    if (!singleReading) {
-      retries = 10;
+      retries = 5;
    }
    float rawValue = 0;
    int count = 0;
    for (size_t i = 0; i < retries; i++) {
       float readValue = analogRead(BAT_VOLT_SENSE_PIN);
-      delayMicroseconds(18000);
+      if (DEBUG_FLAG) Serial.printf("Voltage Read(%d) : %.1fmV corrected: %.1fmV \n", i, readValue, (readValue * VDD_CORRECTION_FACTOR));
+      delayMicroseconds(20000);
       rawValue += readValue;
       count++;
    }
@@ -605,6 +613,7 @@ void saveSettingsToFlash(int startAddr) {
    writeIntToFlash(settings.clearscreen, startAddr);
    writeIntToFlash(settings.showBatteryWarning, startAddr + 5);
    writeIntToFlash(settings.showWifiWarning, startAddr + 10);
+   writeIntToFlash(settings.sleepDisabled, startAddr + 15);
    Serial.println("[MEM] Settings saved to EEPROM");
 }
 
@@ -612,9 +621,10 @@ void restoreSettingsToFlash(int startAddr) {
    settings.clearscreen = readIntFromFlash(startAddr);
    settings.showBatteryWarning = readIntFromFlash(startAddr + 5);
    settings.showWifiWarning = readIntFromFlash(startAddr + 10);
+   settings.sleepDisabled = readIntFromFlash(startAddr + 15);
    Serial.println("[MEM] Settings restored from EEPROM");
    if (DEBUG_FLAG) {
-      Serial.printf("[MEM] Settings - ClearScreen: %d BatteryWarning: %d WifiWarning: %d \n", settings.clearscreen, settings.showBatteryWarning, settings.showWifiWarning);
+      Serial.printf("[MEM] Settings - ClearScreen: %d BatteryWarning: %d WifiWarning: %d SleepDisabled: %d\n", settings.clearscreen, settings.showBatteryWarning, settings.showWifiWarning, settings.sleepDisabled);
    }
 }
 
@@ -687,24 +697,26 @@ bool wifiSmart() {
    for (int i = 0; i < 5; i++) {
       wifiSettings.wifiRetries++;
       Serial.printf("[NETWORK] connect try cont %d / %d\n", i + 1, 5);
-      if (doReset && i >= 3) {
+      if (doReset && i >= 1) {
          break;  // leave wifi search quick on reset
-      }
-      if (waitDisplayComplete(true) && i >= 3 && isWifi == false) {
-         BleInit(CLIENT_ID, true);  // needs to wait for display, otherwise scan no results
       }
       if (wifiSettings.ssid.length() < 2) {
          Serial.println("[NETWORK] Stop connect because no wifi set");
          break;
       }
+      if (waitDisplayComplete(true) && i >= 1 && isWifi == false) {
+         BleInit(CLIENT_ID, true);  // needs to wait for display, otherwise scan no results
+      }
       WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
-      WiFi.waitForConnectResult();
+      WiFi.waitForConnectResult(10000UL);
       if (WiFi.status() == WL_CONNECTED) {
          break;
       }
       WiFi.disconnect(true);
+
       delay(1000);
-      if (!isWifi && i >= 3 && waitDisplayComplete(true)) {
+      if (!isWifi && i >= 1 && waitDisplayComplete(true)) {
+         BleInit(CLIENT_ID, true);
          Serial.println("[NETWORK] stop search because default wifi");  // skip the intense connect if default wifi
          break;
       }
@@ -721,7 +733,6 @@ bool wifiSmart() {
    // if wifi was connected in the past (device is activated but no wifi)
    // restart bluetooth to set new wifi
 
-   if (WiFi.status() != WL_CONNECTED) startupCounter(true);  // only reset startup counter if no wifi. otherwise wait longer
    if (WiFi.status() != WL_CONNECTED && getActivatedFromMem() && buttonWake == true) {
       Serial.println("[NETWORK] BLE reprovisioning for wifi reconnect");
       BleInit(CLIENT_ID, true);
@@ -831,7 +842,6 @@ bool wifiSmart() {
       String testPASS = readStringFromFlash(40);
       Serial.printf("[NETWORK] From Flash: SSID: \"%s\" PW: \"%s\"\n", testSSID.c_str(), testPASS.c_str());
 #endif
-      startupCounter(true);
       BleInit(CLIENT_ID, false);
       if (!isReconnect) {
          resetAll(false, false);          // dont reset the device if the device was there and was just reconnected
@@ -1087,12 +1097,16 @@ bool BleInit(String deviceId, bool enable) {
 int downloadAndSaveFile(String fileName, String url) {
    bool success = 0;
    int systemFileSize = 0;
+   WiFi.setSleep(false);
    HTTPClient http;
    http.setTimeout(10000);
+   http.setReuse(true);
 
-   if (url.indexOf("https://") > 0) {
+   if (url.indexOf("https:") >= 0) {
+      Serial.println("[DL] Download HTTPS");
       http.begin(url, cert);
    } else {
+      Serial.println("[DL] Download HTTP");
       http.begin(url);
    }
 
@@ -1106,8 +1120,8 @@ int downloadAndSaveFile(String fileName, String url) {
 
          if (SerialFlash.exists(fileName.c_str())) {
             Serial.println("[FLASH] Delete File");
-            SerialFlashFile file = SerialFlash.open(fileName.c_str());
-            file.erase();
+            saveFile = SerialFlash.open(fileName.c_str());
+            saveFile.erase();
             saveFile.close();
          }
 
@@ -1118,7 +1132,6 @@ int downloadAndSaveFile(String fileName, String url) {
          Serial.println(len);
          int buff_size = 8128;
          unsigned char* buff = (unsigned char*)malloc(buff_size);
-         unsigned char* file = (unsigned char*)malloc(httpFileSize);
 
          WiFiClient* stream = http.getStreamPtr();
          size_t downloaded_data_size = 0;
@@ -1126,17 +1139,19 @@ int downloadAndSaveFile(String fileName, String url) {
             // Available limited to 16328 bytes. Might be TLS segementation.
             size_t size = stream->available();
             if (size) {
-               int c = stream->readBytes(buff, ((size > buff_size) ? buff_size : size));
+               int c = stream->read(buff, ((size > buff_size) ? buff_size : size));
                saveFile.write(buff, c);
                if (len > 0) {
                   len -= c;
                }
                downloaded_data_size += size;
+            } else {
+               delay(1);
             }
-            delay(1);
             if (WiFi.status() != WL_CONNECTED) {
                http.end();
                saveFile.close();
+               free(buff);
                return -4;
             }
          }
@@ -1518,7 +1533,8 @@ int setImageFromFS(String fileName) {
       int counter = OFFSET_BITMAP;
       saveFile.seek(counter);
       // runonce = true;
-      display.fillRect(0, 0, EPD_WIDTH, EPD_HEIGHT, GxEPD_WHITE);
+      // display.fillRect(0, 0, EPD_WIDTH, EPD_HEIGHT, GxEPD_WHITE);
+      display.fillScreen(GxEPD_WHITE);
       for (int i = 0; i < height; i++) {
          saveFile.read(buffer, bufferSize);
          if (width % 2) {
@@ -1691,7 +1707,7 @@ void displayDebugInfo() {
    String info3 = "um mich zu wecken.";
 
    char msg[128];
-   sprintf(msg, "%s%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=99");
+   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=99");
 
    uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
    uint8_t blockSize;
@@ -1879,10 +1895,10 @@ void displayOtaScreen() {
       u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);   // start writing at this position
       u8g2_for_adafruit_gfx.print("Updating Software");
 
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                                                         // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Please dont turn off the device. The Update takes approx. 45 seconds.");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                                                       // start writing at this position
-      u8g2_for_adafruit_gfx.print("Please dont turn off the device. The Update takes approx. 45 seconds.");              // UTF-8 string: "<" 550 448 664 ">"
+      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                                                           // extended font
+      tw = u8g2_for_adafruit_gfx.getUTF8Width("Please do not turn off the device. The Update takes approx. 45 seconds.");  // text box width
+      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                                                         // start writing at this position
+      u8g2_for_adafruit_gfx.print("Please do not turn off the device. The Update takes approx. 45 seconds.");              // UTF-8 string: "<" 550 448 664 ">"
 
       displayOverlays(display, displayInfos, true, fullColor);
 
@@ -1958,7 +1974,7 @@ void displayTurnOn() {
    String info3 = "um mich zu wecken.";
 
    char msg[128];
-   sprintf(msg, "%s%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=99");
+   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=99");
 
    uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
    uint8_t blockSize;
@@ -2084,7 +2100,6 @@ void displayWifiActivate(bool wifiProvisioningDone) {
 
    char msg[128];
    sprintf(msg, "%s%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=", wifiProvisioningDone ? "1" : "0");
-   // sprintf(msg, "%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID);
 
    uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
    uint8_t blockSize;
@@ -2556,12 +2571,15 @@ bool getImageUrl(bool reset) {
 // sleep x seconds
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
+   pinMode(CS_EPD_PIN, OUTPUT);
+   pinMode(DC_PIN, OUTPUT);
    checkOrientationInBackground(0, false);
-   WiFi.disconnect(true);
-   accIntSet(80);  // Set acc int wakeup /TODO: disable if no motion wakeup
-   // struct timeval currentTime;
-   // gettimeofday(&currentTime, NULL);
-   // previousWakeup = currentTime;  // this is important for next wakeup calculation, do not delete it.
+   if (!settings.sleepDisabled) WiFi.disconnect(true);
+   if (motionWake) {
+      accIntSet(80);  // Set acc int wakeup /TODO: disable if no motion wakeup
+   } else {
+      accIntSet(0);
+   }
    waitDisplayComplete(false);
    if (wakeuptimeout <= 0 && showScreen) {
       displayTurnOn();  // Ich schlafe screen
@@ -2569,27 +2587,17 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    }
    ledBlink(0, false);
    delay(5);
-   display.powerOff();
-   delay(5);
    display.hibernate();
    delay(5);
-   digitalWrite(RST_PIN, 0);
-   pinMode(LED_PIN, INPUT);
+   // digitalWrite(RST_PIN, 0);
    Serial.flush();
    delay(10);
-   setCpuFrequencyMhz(10);
+   if (!settings.sleepDisabled) setCpuFrequencyMhz(40);
    delay(5);
-   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-   if (wakeuptimeout > 0) {
-      esp_sleep_enable_timer_wakeup(wakeuptimeout * uS_TO_S_FACTOR);
-   } else {
-      esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-   }
-
    pinMode(RST_PIN, INPUT);
    pinMode(CS_EPD_PIN, INPUT);
    pinMode(DC_PIN, INPUT);
-   pinMode(LED_PIN, INPUT);
+   if (!settings.sleepDisabled) pinMode(LED_PIN, INPUT);
    pinMode(CS_FLASH_PIN, INPUT);
    pinMode(SCK_PIN, INPUT);
    pinMode(MOSI_PIN, INPUT);
@@ -2598,18 +2606,32 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    pinMode(I2C_SCL_PIN, INPUT);
    pinMode(BAT_VOLT_EN_PIN, INPUT);
    pinMode(CHG_EN_PIN, INPUT);
-   // esp_sleep_cpu_retention_init();
-   // gpio_wakeup_enable(GPIO_NUM_0, GPIO_INTR_LOW_LEVEL);
-   // gpio_pullup_dis(GPIO_NUM_0);
-   // gpio_pulldown_en(GPIO_NUM_0);
+   pinMode(12, INPUT);  // USB TEST PINS
+   pinMode(13, INPUT);  // USB TEST PINS
+   if (settings.sleepDisabled) {
+      int versionStored = newVersionSave;
+      Serial.printf("[SLEEP] enter soft sleep\n");
+      tickerFailsave.detach();
+      awsConnect(true);
+      ledBlink(2000, true);
+      while (true) {
+         delay(100);
+         client.loop();
+         if (newVersionSave != versionStored) {
+            Serial.println("[SLEEP] new version detected during soft sleep, restarting to update");
+            ESP.restart();
+            break;
+         }
 
-   // esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-   // esp_sleep_disable_ext1_wakeup_io(0);
-   // esp_sleep_enable_ext0_wakeup(GPIO_NUM_34, 0);  // 1 = High, 0 = Low
-   // esp_sleep_enable_gpio_wakeup();
-   //    TODO: Use light sleep for short sleep periods to keep the wakeup time shorter (measure this)
-   // setCpuFrequencyMhz(40);
-   // esp_light_sleep_start();
+         // TODO: add watchdog feed and also add fallback. disable timeout
+      }
+   }
+   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+   if (wakeuptimeout > 0) {
+      esp_sleep_enable_timer_wakeup(wakeuptimeout * uS_TO_S_FACTOR);
+   } else {
+      esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+   }
    if (motionWake) {
       esp_sleep_enable_ext1_wakeup_io(BUTTON_PIN_BITMASK(GPIO_NUM_0), ESP_EXT1_WAKEUP_ANY_HIGH);
       rtc_gpio_pulldown_en(GPIO_NUM_0);
@@ -2703,7 +2725,7 @@ wakeup_reason_t getWakeupReason() {
    return wakeup_reason_t::SYSTEM_RESET;
 }
 
-int startupCounter(bool reset) {
+void startupCounter(int reset) {
    preferences.begin("my-app", false);
    unsigned int counter = preferences.getUInt("counter", 0);
    counter++;
@@ -2714,10 +2736,12 @@ int startupCounter(bool reset) {
    }
    preferences.putUInt("counter", counter);
    preferences.end();
-   return counter;
+   StartCounter = counter;
+   return;
 }
 
 bool resetAll(bool resetActivation, bool resetWifi) {
+   checkOrientationInBackground(0, false);
    Serial.printf("[MAIN] Reset - ACT %d | WIFI %d \n", resetActivation, resetWifi);
 
    writeIntToFlash(0, 220);               // restore screen orient to default
@@ -2890,7 +2914,7 @@ int accInit(bool skipInit) {
       orientation = 3;
    }
 
-   if (DEBUG_FLAG) Serial.printf("[ACC] Values: X:%d Y:%d Z:%d Orient: %d \n", acc_x, acc_y, acc_z, orientation);
+   if (DEBUG_FLAG && !skipInit) Serial.printf("[ACC] Values: X:%d Y:%d Z:%d Orient: %d \n", acc_x, acc_y, acc_z, orientation);
 
    // Put IMU back into standby
    myIMU.resetInterrupt();
@@ -2899,6 +2923,12 @@ int accInit(bool skipInit) {
 }
 
 bool accIntSet(int sensity) {
+   pinMode(INT_PIN, INPUT);
+   if (sensity == 0) {
+      myIMU.resetInterrupt();
+      myIMU.standby(true);
+      return true;
+   }
    myIMU.resetInterrupt();
    delay(1);
    myIMU.intConf(sensity, 3, 10, HIGH, -1, true, false, true, false, true);
@@ -2910,6 +2940,7 @@ void recheckAccOrient(int setOrientValue) {
    if (stopAccRecheck) return;
    int accCheck = accInit(true);
    if (accCheck != readIntFromFlash(220)) {
+      isOrientUpdate = true;
       systemData.deviceOrientation = accCheck;
       Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
       writeIntToFlash(systemData.deviceOrientation, 220);
@@ -2927,17 +2958,19 @@ void recheckAccOrient(int setOrientValue) {
          ESP.restart();
       }
    } else {
-      if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck\n");
+      // if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck\n");
    }
 }
 
 void checkOrientationInBackground(int setOrientValue, bool isRunning) {
    if (isRunning) {
       stopAccRecheck = false;
+      Serial.printf("[ACC] Background update start\n");
       periodicAccCheck.attach_ms(1000, recheckAccOrient, setOrientValue);
    } else {
+      Serial.printf("[ACC] Background update stop\n");
       stopAccRecheck = true;
-      onceTicker.detach();
+      periodicAccCheck.detach();
       return;
    }
 
@@ -3006,72 +3039,67 @@ void test() {
    pinMode(INT_PIN, OUTPUT);
    digitalWrite(INT_PIN, LOW);
    Serial.println("[DEBUG] Test Function");
-   startupCounter(true);
-   // displaySettings.displayQuickRefreshTime = 2900;//works cold
+   //  displaySettings.displayQuickRefreshTime = 2900;//works cold
    ledBlink(200, false);
-   bool wifiConnected = wifiSmart();  // Replaces wifi begin
-   delay(1000);
-
-   awsConnect(true);
-
-   char TOPIC_ACTIVATE[64];
-   char payload[256];
-
-   sprintf(TOPIC_ACTIVATE, "$aws/things/%s/activateepaper", CLIENT_ID);
-   sprintf(payload, "{\"test\": 111}");  // Create the payload for publishing
-
-   client.publish(TOPIC_ACTIVATE, payload, false, 0);
-
-   while (true) {
-      delay(100);
-      client.loop();
-   }
+   displaySettings.quickRefresh = true;
+   gotToDeepSleep(0, true, false);
 
    int timeout;
    timeout = calculateSleepDuration(DEFAULT_SLEEP, false, false);
    Serial.printf("time to next update: %d\n", timeout);
-   gotToDeepSleep(60, false, true);
    while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
-      bool testCharge = chargeMode(true);
+      // bool testCharge = chargeMode(false);
       systemData.vddValue = readVDD(false);
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
    };
+   gotToDeepSleep(60, false, true);
 
    // display.powerOff();
    //  BleInit(CLIENT_ID, true);
 }
 
 void setup() {
+   chargeMode(false);  // enable charge mode
+   pinMode(BAT_VOLT_EN_PIN, OUTPUT);
+   digitalWrite(BAT_VOLT_EN_PIN, LOW);
    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
    pinMode(LED_PIN, OUTPUT);
    digitalWrite(LED_PIN, LOW);
-   systemData.vddValue = readVDD(false);
+   Serial.begin(115200);
+   analogReadResolution(12);
    systemData.usbConnected = usbCheckConnect();
-   if (!systemData.usbConnected && systemData.vddValue < 4000) {
+   delay(90);
+   systemData.vddValue = readVDD(false);
+   if (!systemData.usbConnected && systemData.vddValue < 4100) {
+      if (DEBUG_FLAG) Serial.printf("[MAIN] Bat low protection: %dmV (counter: %d)\n", systemData.vddValue, StartCounter);
+      startupCounter(true);
+      systemData.vddValue = 0;
       digitalWrite(LED_PIN, HIGH);
       gotToDeepSleep(86000, false, false);
    }
    systemData.wakeupCause = getWakeupReason();
    if (systemData.wakeupCause == wakeup_reason_t::BUTTON) {
       buttonWake = true;
-      StartCounter = startupCounter(false);
+      startupCounter(false);
+      if (StartCounter >= 5) {
+      } else {
+         tickerStatupCounter.once_ms(3000, startupCounter, 1);
+      }
 
    } else {
-      // reset startup counter if no button
-      StartCounter = startupCounter(true);
+      startupCounter(true);
    }
-   EepromInit(EEPROM_SIZE);
 
+   EepromInit(EEPROM_SIZE);
    pinMode(12, INPUT);  // USB TEST PINS
    pinMode(13, INPUT);  // USB TEST PINS
    pinMode(INT_PIN, INPUT);
    pinMode(RST_PIN, OUTPUT);
    pinMode(CS_EPD_PIN, OUTPUT);
    pinMode(DC_PIN, OUTPUT);
-   analogReadResolution(12);
 
 #if DEBUG
    displayInfos.version = true;
@@ -3101,9 +3129,9 @@ void setup() {
    SPI.setFrequency(20000000);
    SerialFlash.begin(CS_FLASH_PIN);  // proceed even if begin() fails
    u8g2_for_adafruit_gfx.begin(display);
+   chargeMode(false);
 
    setDeviceUid();
-
    // TODO: maybe do a function to generally check updated mem values
 
    systemData.deviceOrientation = accInit();
@@ -3112,7 +3140,6 @@ void setup() {
       displaySettings.rotationText = 1;
       displaySettings.rotationPicture = 0;
    }
-   chargeMode(false);  // enable charge mode
    float temperature = temperatureRead();
    if (DEBUG_FLAG) Serial.printf("[MAIN] Temp Main: %.2f °C\n", temperature);
    if (temperature < 21.0) {
@@ -3124,13 +3151,13 @@ void setup() {
    checkDeviceBatch();  // set settings for specific versions (1=old revision)
    // test();              //-----------------test---------please remove
 #endif
-   onceTicker.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
+   tickerFailsave.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
    testModeCheck();                   // check if needs to enter deploy state
    bool wifiConnected = wifiSmart();  // Replaces wifi begin
 
    ledBlink(500, true);
-   onceTicker.detach();
-   onceTicker.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
+   tickerFailsave.detach();
+   tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
 
 #if DEBUG
    if (StartCounter > 2) {
@@ -3168,7 +3195,6 @@ void setup() {
    }
 #endif
 
-   startupCounter(true);
    bool activationDone = deployDevice();
    saveSettingsToFlash(EEPROM_SETTINGS_ADR);
    if (!getActivatedFromMem() && isTestMode) {
@@ -3273,6 +3299,7 @@ void loop() {
          delay(25);
          int setSuccess = setImageFromFS(fileName);
          debugFS();
+         if (isOrientUpdate) return;  // if orientation change during update stop process to avoid wrong update state
          if (dlSuccess == 0 && setSuccess == 0) {
             setUpdateState("update_ok");
             writeIntToFlash(newVersionSave, 150);
