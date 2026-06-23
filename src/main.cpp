@@ -232,8 +232,8 @@ bool usbCheckConnect();
 void debugCheck();
 int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly = false);
 bool powerSupplyDisplay(bool enable);
-bool sdInit();
-void sdTest();
+bool sdInit(bool forceFormat = false);
+void sdTest(bool doLog = false);
 wakeup_reason_t getWakeupReason();
 
 void WiFiEvent(WiFiEvent_t event) {
@@ -1571,6 +1571,9 @@ void printDebugInfo() {
    systemData.vddValue = readVDD(false);
    bool isUsb = usbCheckConnect();
    int accTest = accInit();
+   powerSupplyDisplay(true);
+   delay(100);
+   sdInit(true);
 
    // test flash
    int buffLen = 4;
@@ -1610,6 +1613,7 @@ void printDebugInfo() {
    for (int i = 0; i < textLines; i++) {
       Serial.println(info[i]);
    }
+   sdTest();
    Serial.println("[TEST] END");
 }
 // sleep x seconds
@@ -1860,22 +1864,22 @@ void flashTest() {
       // wait, 30 seconds to 2 minutes for most chips
    }
 }
-void sdTest() {
+void sdTest(bool doLog) {
    // Test read/write
    FsFile testFile;
    if (testFile.open("test.txt", O_WRONLY | O_CREAT | O_TRUNC)) {
-      Serial.println("Writing to test.txt...");
-      testFile.println("Hello SD Card! This is a test of the SdFat library.");
+      if (doLog) Serial.println("Writing to test.txt...");
+      testFile.println("SD Data OK");
       testFile.close();
-      Serial.println("Write complete.");
+      if (doLog) Serial.println("Write complete.");
 
       if (testFile.open("test.txt", O_RDONLY)) {
-         Serial.println("Reading from test.txt:");
+         if (doLog) Serial.println("Reading from test.txt:");
          while (testFile.available()) {
             Serial.write(testFile.read());
          }
          testFile.close();
-         Serial.println("\nRead complete.");
+         Serial.println("SD Test Done");
       } else {
          Serial.println("Failed to open test.txt for reading.");
       }
@@ -1884,9 +1888,9 @@ void sdTest() {
    }
 }
 
-bool sdInit() {
-   if (systemData.sdIsInit) return true;
-   if (!sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
+bool sdInit(bool forceFormat) {
+   if (systemData.sdIsInit && !forceFormat) return true;
+   if (forceFormat || !sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
       Serial.println("[SD] mount failed, attempting to format the card...");
       FatFormatter fatFormatter;
       uint8_t buffer[512];
@@ -2243,7 +2247,9 @@ void test() {
    Serial.println("[DEBUG] Test Function");
    // gotToDeepSleep(86000, false, false);
    if (powerSupplyDisplay(true)) delay(100);
-   sdInit();
+
+   sdTest();
+   while (true) {};
    bool quickref = true;
    int zufallszahl = random(2, 16);
    analogWrite(LED_PIN, 100);
@@ -2305,7 +2311,6 @@ void test() {
 
    displaySetQuickRefresh(false);
    displayWifiActivate(false);
-   // sdTest();
    ledBlink(500, true, LED_DIM_VALUE);
    // gotToDeepSleep(600, true, false);
    //  displayOtaScreen();
