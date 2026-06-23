@@ -3,7 +3,7 @@ name: "b2.0.${{ github.run_number }}"
 on:
   push:
     branches:
-      - develop
+      - paper-l
 
 jobs:
   build:
