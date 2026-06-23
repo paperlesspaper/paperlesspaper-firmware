@@ -1,4 +1,5 @@
-name: "b2.0.${{ github.run_number }}"
+name: "Dev Build"
+run-name: "b2.0.${{ github.run_number }}"
 
 on:
   push:
