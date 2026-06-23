@@ -1,32 +1,29 @@
-#include <FS.h>
+// #include <FS.h>
+#include "epaper_display.h"
+#include "types.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
+
 #define DEST_FS_USES_SPIFFS
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <GxEPD2_7C.h>
 #include <MQTT.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
-// #include <SD_MMC.h>
 #include <SPI.h>
 #include <SerialFlash.h>
-#include <U8g2_for_Adafruit_GFX.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <esp32fota.h>
-#include <qrcode.h>
 #include <rom/rtc.h>
 
-#include "Adafruit_GFX.h"
 #include "EEPROM.h"
 #include "SPIFFS.h"
+#include "SdFat.h"
 #include "Ticker.h"
 #include "driver/rtc_io.h"
 #include "kxtj3-1057.h"
 #include "secrets.h"
-
-#define DEBUG 1
 
 #if DEBUG
 #define PRINTS(s)         \
@@ -49,14 +46,21 @@
 #endif
 #define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
 
+#ifdef EPD_TYPE_13INCH
+
+#define OTA_URL ENV_OTA_URL_13
+#define OTA_URL_DEV ENV_OTA_URL_DEV_13
+#else
+#define OTA_URL ENV_OTA_URL
+#define OTA_URL_DEV ENV_OTA_URL_DEV
+#endif
+
 // E-Paper Pins
-#define BUSY_PIN 18
-#define RST_PIN 1
-#define DC_PIN 19
-#define CS_EPD_PIN 20
+#define DISP_POWER 12
 
 // flash
 #define CS_FLASH_PIN 21
+#define CS_SD_PIN 13
 
 // SPI Pins
 #define SCK_PIN 15
@@ -82,50 +86,37 @@
 const char* keyFileCons;
 const char* crtFileCons;
 
-#define EPD_WIDTH 800
-#define EPD_HEIGHT 480
-#define OFFSET_BITMAP 4  // how many bytes store the picture information (resolution)
+#ifdef EPD_TYPE_13INCH
+#define EPD_TYPE_IDENTIFIER "epd13-"
+#define VDD_CORRECTION_FACTOR 6.68
+#else
+#define EPD_TYPE_IDENTIFIER "epd7-"
+#define VDD_CORRECTION_FACTOR 2.30
+#endif
 
-#define uS_TO_S_FACTOR 1000000ULL    /* Conversion factor for micro seconds to seconds */
-#define LENGTH(x) (strlen(x) + 1)    // length of char string
-#define EEPROM_SIZE 1024             // EEPROM size
-#define EEPROM_SETTINGS_ADR 500      // start address to store settings
-#define SOFTWARE_VERSION "0.0.0"     // Software version
-#define EPD_TYPE_IDENTIFIER "epd7-"  // Type of device (screen type)
-#define OTA_URL ENV_OTA_URL
-#define OTA_URL_DEV ENV_OTA_URL_DEV
+#define BAT_LOW_VALUE 4300
+#define BAT_OFF_VALUE 4200
+#define OFFSET_BITMAP 4
+#define uS_TO_S_FACTOR 1000000ULL
+#define LENGTH(x) (strlen(x) + 1)
+#define EEPROM_SIZE 1024
+#define EEPROM_SETTINGS_ADR 500
 #define DEFAULT_WIFI_PW ENV_WIFI_PW_DEPLOY
 #define DEFAULT_WIFI_SSID ENV_WIFI_SSID_DEPLOY
-#define DEFAULT_SLEEP 3600          // Default time how long to sleep after update
-#define WIFI_INIT_TIME 300          // Time how long to wait for ESPTouch to finish
-#define APPCONNECT_INIT_TIME 300    // Time how long to wait for Onboarding to finish
-#define FAILSAVE_TIMER 180          // Time to shutdown the device if no reaction or hangup
-#define MAX_RECONNECTS 10           // (default 10) maximum wifi reconnect loops with wifi configured until 24h deep sleep
-#define RECONNECT_LOOP_TIME 60      // (default 60) how many seconds the reconnect is active to set new wifi password
-#define BAT_LOW_VALUE 4200          // value to show battery low
-#define BAT_OFF_VALUE 4000          // value to not boot anymore
-#define VDD_CORRECTION_FACTOR 2.30  // factor to get real VDD voltage from measured value
+#define DEFAULT_SLEEP 3600
+#define WIFI_INIT_TIME 300
+#define APPCONNECT_INIT_TIME 300
+#define FAILSAVE_TIMER 180
+#define MAX_RECONNECTS 10
+#define RECONNECT_LOOP_TIME 60
 #define SLEEP_RECALCULATION_PERIOD_SECONDS 30
+#define LED_DIM_VALUE 5
 
 #if DEBUG
 const bool DEBUG_FLAG = true;
 #else
 const bool DEBUG_FLAG = false;
 #endif
-
-#define FONT_MAIN u8g2_font_helvB24_tf  // Font for main text
-#define FONT_BIG u8g2_font_helvB14_tf   // Font for big text
-#define FONT_NORMAL u8g2_font_helvB12_tf
-#define FONT_SMALL u8g2_font_helvR08_tf
-#define FONT_INFO u8g2_font_7x14_tf
-#define FONT_VERSION u8g2_font_tom_thumb_4x6_tf
-
-typedef enum {
-   SYSTEM_RESET = 0,
-   BUTTON = 1,
-   MOTION = 2,
-   TIMER = 3,
-} wakeup_reason_t;
 
 struct wifiSettings {
    String bleSSID;  // Seconds to Sleep after update done
@@ -155,90 +146,47 @@ struct wifiSettings {
     .clientId = "",
 };
 
-// display extra infos on top of all screens
-struct displayInfo {
-   bool version;
-   bool batteryInfo;
-   bool batteryLowBig;
-   bool wifiSignal;
-   bool deviceInfoString;
-   bool wifiOfflineBig;
-} displayInfos = {
-    .version = false,
-    .batteryInfo = false,
-    .batteryLowBig = false,
-    .wifiSignal = false,
-    .deviceInfoString = false,
-    .wifiOfflineBig = false};
-
-struct displaySettings {
-   uint8_t rotationText;
-   uint8_t rotationPicture;
-   bool quickRefresh;
-   int displayQuickRefreshTime;
-} displaySettings = {
-    .rotationText = 3,
-    .rotationPicture = 2,
-    .quickRefresh = true,
-    .displayQuickRefreshTime = 960};
-
 // settings set via MQTT/IOT
-struct settings {
-   int timeout;       // Seconds to Sleep after update done
-   String lut;        // Color Settings for EPD
-   bool clearscreen;  // if clear screen before update
-   bool showBatteryWarning;
-   bool showWifiWarning;
-   bool sleepDisabled;
-} settings = {.timeout = DEFAULT_SLEEP, .lut = "default", .clearscreen = true, .showBatteryWarning = true, .showWifiWarning = true, .sleepDisabled = false};
+Settings settings = {
+    .timeout = DEFAULT_SLEEP,
+    .lut = "default",
+    .clearscreen = true,
+    .showBatteryWarning = true,
+    .showWifiWarning = true,
+    .sleepDisabled = false};
 
 // system read data
-struct systemData {
-   wakeup_reason_t wakeupCause;
-   int vddValue;
-   int sleepPrediction;
-   bool newSleepTimeSet;
-   bool usbConnected;
-   int deviceOrientation;
-} systemData = {
+SystemData systemData = {
     .wakeupCause = SYSTEM_RESET,
     .vddValue = 5000,
+    .ledDimValue = 100,
     .sleepPrediction = DEFAULT_SLEEP,
     .newSleepTimeSet = false,
     .usbConnected = true,
-    .deviceOrientation = 0};
+    .deviceOrientation = 0,
+    .displayPowerOn = false,
+    .sdIsInit = false};
 
 esp_sleep_wakeup_cause_t wakeup_reason;
-using DisplayType = GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT / 4>;
-DisplayType display(GxEPD2_730c_GDEP073E01(/*CS=*/CS_EPD_PIN, /*DC=*/DC_PIN, /*RST=*/RST_PIN, /*BUSY=*/BUSY_PIN));  // Waveshare 5.65" 7-color
-KXTJ3 myIMU(ACC_ADDR);                                                                                              // Address can be 0x0E or 0x0F
+KXTJ3 myIMU(ACC_ADDR);  // Address can be 0x0E or 0x0F
 esp32FOTA myEsp32FOTA("esp32-fota-http", SOFTWARE_VERSION);
-QRCode QR;
 WiFiClientSecure net = WiFiClientSecure();
 MQTTClient client(512);  // Buffer to 256 Byte
 Preferences preferences;
-U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;
 Ticker tickerFailsave;
 Ticker perdiodicLed;
 Ticker perdiodicLedOff;
 Ticker periodicAccCheck;
-Ticker onceDisplay;
 Ticker tickerStatupCounter;
 SerialFlashFile saveFile;
+SdFs sd;
 RTC_DATA_ATTR timeval previousWakeup = timeval{.tv_sec = 0, .tv_usec = 0};
 
 NimBLECharacteristic* wifiConnectedCharacteristic;
 NimBLEAdvertising* pAdvertising;
 static NimBLEServer* pServer;
 
-struct dataLayout {
-   int integer;
-   char byte[4];
-};
-
 char HOST_ADDRESS[] = ENV_AWS_IOT_ENDPOINT;
-const uint8_t QR_VERSION = 3;     // QR Code Version
-const uint8_t QR_QUIET_ZONE = 4;  // quiet zone all around
 
 uint32_t freeHeap = 0;
 int newVersionSave = 0;
@@ -258,13 +206,12 @@ bool isNewVersion = false;
 bool isDlUrl = false;
 bool periodicLedIsOn = false;
 int periodicLedTimeout = 0;
-bool epaperIsUpdating = false;
 bool isTestMode = false;  // enabled if the device is in deployment and tests are running
 bool buttonWake = false;  // true if wakeup via reset button
 bool stopAccRecheck = false;
 bool isOrientUpdate = false;
 
-void ledBlink(int timeout, bool on);
+void ledBlink(int timeout, bool on, int dimValue = 100);
 bool awsConnect(bool connect);
 bool getVersionUpdate(void);
 void startupCounter(int reset);
@@ -277,19 +224,6 @@ bool setUpdateState(String state);
 void writeIntToFlash(int value, int startAddr);
 int storeSleepTimeMem(int updateTime = 0);
 void gotToDeepSleep(int seconds, bool showScreen = true, bool motionWake = true);
-bool updateDisplayAsync(String functionName);
-void displayOverlays(DisplayType& display, displayInfo displayData, bool invertColors, bool fullcolor = false);
-int setImageFromFS(String fileName);
-void displayDebugInfo();
-void displayWipe(bool quick);
-void displaySetText(String info, bool blackBoard, bool quickRefresh = true);
-void displaySetBlankTest(int offsetVar, bool doQuickRefresh);
-void displayNoPicture();
-void displayTurnOn();
-void displayUpdatePicture();
-void displayWifiActivate(bool wifiProvisioningDone);
-bool waitDisplayComplete(bool quick);
-int accInit(bool skipInit = false);
 bool accIntSet(int sensity);
 void checkOrientationInBackground(int setOrientValue, bool isRunning = true);
 bool chargeMode(bool enable);
@@ -297,6 +231,9 @@ bool usbInit();
 bool usbCheckConnect();
 void debugCheck();
 int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly = false);
+bool powerSupplyDisplay(bool enable);
+bool sdInit();
+void sdTest();
 wakeup_reason_t getWakeupReason();
 
 void WiFiEvent(WiFiEvent_t event) {
@@ -327,7 +264,7 @@ void WiFiEvent(WiFiEvent_t event) {
 }
 
 void timeoutFailsave(int time) {
-   Serial.println("printing in once function.");
+   Serial.println("[MAIN] Failsave Timeout - Sleep Device");
    if (getActivatedFromMem()) {
       if (settings.timeout > 0) {
          gotToDeepSleep(settings.timeout);  // Disable version Check here
@@ -361,7 +298,7 @@ void iotReceiveHandler(String& topic, String& payload) {
          myEsp32FOTA.setManifestURL(otaUrlTemp);
          bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
          if (updatedNeeded) {
-            displaySettings.quickRefresh = true;
+            displaySetQuickRefresh(true);
             waitDisplayComplete(false);
             delay(200);
             displaySetText("Updating Software...", true, true);
@@ -432,22 +369,28 @@ void iotReceiveHandler(String& topic, String& payload) {
 }
 
 void ledBlinkFunctionOff() {
-   digitalWrite(LED_PIN, LOW);
+   analogWrite(LED_PIN, 0);
    perdiodicLedOff.detach();
 }
 
 void ledBlinkFunction() {
-   digitalWrite(LED_PIN, HIGH);
+   analogWrite(LED_PIN, systemData.ledDimValue);
    perdiodicLedOff.attach_ms(periodicLedTimeout * 0.2, ledBlinkFunctionOff);
 }
 
 // set blink with timeout in ms
-void ledBlink(int timeout, bool on) {
+void ledBlink(int timeout, bool on, int dimValue) {
+   pinMode(LED_PIN, OUTPUT);
+   if (dimValue > 100) dimValue = 100;
+   if (dimValue < 0) dimValue = 0;
+   systemData.ledDimValue = (dimValue * 255) / 100;
+   if (DEBUG_FLAG) Serial.printf("[LED] Set DIM: %d Set Time: %d On: %d (dimInput:%d)\n", systemData.ledDimValue, timeout, on, dimValue);
+
    if (on) {
       if (timeout <= 0) {
          perdiodicLed.detach();
          perdiodicLedOff.detach();
-         digitalWrite(LED_PIN, HIGH);
+         analogWrite(LED_PIN, systemData.ledDimValue);  // Dim brightness (0-255)
          return;
       }
       periodicLedIsOn = true;
@@ -457,61 +400,11 @@ void ledBlink(int timeout, bool on) {
    } else {
       perdiodicLed.detach();
       perdiodicLedOff.detach();
-      digitalWrite(LED_PIN, LOW);
+      analogWrite(LED_PIN, 0);
       delay(periodicLedTimeout * 0.3);
-      digitalWrite(LED_PIN, LOW);
+      analogWrite(LED_PIN, 0);
       periodicLedIsOn = false;
    }
-}
-
-// inputs: nopicture,turnon,updatepicture,wifiactivate,deviceactivate
-void updateDisplayAsyncFunction(int functionNumber) {
-   epaperIsUpdating = true;
-   if (functionNumber == 1) {
-      displayNoPicture();
-   }
-   if (functionNumber == 2) {
-      displayTurnOn();
-   }
-   if (functionNumber == 3) {
-      displayUpdatePicture();
-   }
-   if (functionNumber == 4) {
-      displayWifiActivate(false);
-   }
-   if (functionNumber == 5) {
-      displayWifiActivate(true);
-   }
-
-   epaperIsUpdating = false;
-   return;
-}
-
-// set blink with timeout in ms
-// inputs: nopicture,turnon,updatepicture,wifiactivate,deviceactivate
-bool updateDisplayAsync(String functionName) {
-   int functionNumber = 0;
-   if (functionName == "nopicture") {
-      functionNumber = 1;
-   }
-   if (functionName == "turnon") {
-      functionNumber = 2;
-   }
-   if (functionName == "updatepicture") {
-      functionNumber = 3;
-   }
-   if (functionName == "wifiactivate") {
-      functionNumber = 4;
-   }
-   if (functionName == "deviceactivate") {
-      functionNumber = 5;
-   }
-
-   if (epaperIsUpdating || functionNumber < 1) {
-      return false;
-   }
-   onceDisplay.once_ms(100, updateDisplayAsyncFunction, functionNumber);
-   return true;
 }
 
 String mac2String(const uint64_t mac) {
@@ -537,7 +430,11 @@ String mac2String(const uint64_t mac) {
 int readVDD(bool singleReading) {
    pinMode(BAT_VOLT_EN_PIN, OUTPUT);
    pinMode(BAT_VOLT_SENSE_PIN, INPUT);
+#ifdef EPD_TYPE_13INCH
+   digitalWrite(BAT_VOLT_EN_PIN, HIGH);
+#else
    digitalWrite(BAT_VOLT_EN_PIN, LOW);
+#endif
    delay(3);
    int retries = 1;
    if (!singleReading) {
@@ -597,13 +494,13 @@ String readStringFromFlash(int startAddr) {
 }
 
 int readIntFromFlash(int addr) {
-   dataLayout data3;
+   DataLayout data3;
    EEPROM.get(addr, data3);
    return data3.integer;
 }
 
 void writeIntToFlash(int value, int startAddr) {
-   dataLayout data2;
+   DataLayout data2;
    data2.integer = value;
    EEPROM.put(startAddr, data2);
    EEPROM.commit();
@@ -632,6 +529,8 @@ void restoreSettingsToFlash(int startAddr) {
 void emvTest(int counter) {
    bool isUsb = false;
    bool isCharging = false;
+   systemData.deviceOrientation = 0;
+   displaySetRotation(1);
    if (usbCheckConnect()) {
       isCharging = chargeMode(true);
       isUsb = true;
@@ -639,9 +538,11 @@ void emvTest(int counter) {
       isCharging = chargeMode(false);
       isUsb = false;
    }
+   sdInit();
+   sdTest();
    char softwareStringDebug[256];
    sprintf(softwareStringDebug, "Device Test (%s) USB:%d Charger:%d Loop: %d", SOFTWARE_VERSION, isUsb, isCharging, counter);
-   displaySetText(softwareStringDebug, false);
+   displaySetText(softwareStringDebug, false, false);
    WiFi.mode(WIFI_STA);
    delay(100);
    Serial.println("[NETWORK] scan start");
@@ -660,12 +561,19 @@ void emvTest(int counter) {
          Serial.println(WiFi.RSSI(i));
       }
    }
+   BleInit(CLIENT_ID, true);
 }
 
 bool wifiSmart() {
    bool isWifi = true;
    bool isReconnect = false;
    uint8_t reconnectCount = readIntFromFlash(140);
+   bool doReset = false;
+   int wifiTimeout = 10000UL;
+   if (StartCounter >= 5) {
+      doReset = true;
+      wifiTimeout = 3000UL;
+   }
    if (reconnectCount > MAX_RECONNECTS + 1) {
       writeIntToFlash(0, 140);
       Serial.printf("[NETWORK] Fix Reconnect Counter Value and save to MEM \n");
@@ -687,11 +595,10 @@ bool wifiSmart() {
 
 #endif
 
-   bool doReset = false;
-   if (StartCounter >= 5) {
-      doReset = true;
+   if (isWifi == false && isTestMode == false && doReset == false) {
+      powerSupplyDisplay(true);
+      updateDisplayAsync("wifiactivate");
    }
-   if (isWifi == false && isTestMode == false && doReset == false) updateDisplayAsync("wifiactivate");
    // try to connect to current wifi
    wifiSettings.wifiRetries = 0;
    for (int i = 0; i < 5; i++) {
@@ -708,7 +615,7 @@ bool wifiSmart() {
          BleInit(CLIENT_ID, true);  // needs to wait for display, otherwise scan no results
       }
       WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
-      WiFi.waitForConnectResult(10000UL);
+      WiFi.waitForConnectResult(wifiTimeout);
       if (WiFi.status() == WL_CONNECTED) {
          break;
       }
@@ -878,7 +785,8 @@ bool wifiSmart() {
       } else {
          Serial.printf("[NETWORK] Activated but Wifi connect failed ended - sleep 12h \n");
          writeIntToFlash(0, 140);
-         displayInfos.wifiOfflineBig = true;
+         displaySetOverlayOption(WIFI_OFFLINE_BIG, true);
+         delay(10);
          setImageFromFS("tmp.gz");  // reload the last image and show no wifi overlay
          wifiConnectionLostStore(true);
          delay(2000);
@@ -1074,8 +982,8 @@ bool BleInit(String deviceId, bool enable) {
    wifiScanDescriptor->setFormat(NimBLE2904::FORMAT_UTF8);
    wifiScanDescriptor->setCallbacks(&dscCallbacks);
 
-   wifiDataService->start();
-   deviceDataService->start();
+   // wifiDataService->start();
+   // deviceDataService->start();
 
    wifiSsidCharacteristic->setValue("wifi-ssid");
    wifiPwCharacteristic->setValue("wifi-pw");
@@ -1117,20 +1025,36 @@ int downloadAndSaveFile(String fileName, String url) {
       if (httpCode == HTTP_CODE_OK) {
          int len = http.getSize();
          httpFileSize = len;
-
          if (SerialFlash.exists(fileName.c_str())) {
             Serial.println("[FLASH] Delete File");
             saveFile = SerialFlash.open(fileName.c_str());
-            saveFile.erase();
+            SerialFlash.remove(saveFile);
+            saveFile.close();
+         } else {
             saveFile.close();
          }
-
-         SerialFlash.createErasable(fileName.c_str(), httpFileSize);
-         saveFile = SerialFlash.open(fileName.c_str());
+         Serial.printf("[FLASH] Create File Size: %d.\n", httpFileSize);
+         if (SerialFlash.createErasable(fileName.c_str(), httpFileSize)) {
+            saveFile = SerialFlash.open(fileName.c_str());
+            if (!saveFile) {
+               Serial.println("[FLASH] Error opening file");
+               http.end();
+               return -4;
+            }
+         } else {
+            Serial.println("[FLASH] Error creating file");
+            http.end();
+            SerialFlash.eraseAll();
+            while (SerialFlash.ready() == false) {
+               delay(100);
+            }
+            Serial.println("[FLASH] Erase Done");
+            return -3;
+         }
 
          Serial.print("[DL] Download Size: ");
          Serial.println(len);
-         int buff_size = 8128;
+         int buff_size = 8192;
          unsigned char* buff = (unsigned char*)malloc(buff_size);
 
          WiFiClient* stream = http.getStreamPtr();
@@ -1139,7 +1063,8 @@ int downloadAndSaveFile(String fileName, String url) {
             // Available limited to 16328 bytes. Might be TLS segementation.
             size_t size = stream->available();
             if (size) {
-               int c = stream->read(buff, ((size > buff_size) ? buff_size : size));
+               int c = stream->readBytes(buff, ((size > buff_size) ? buff_size : size));
+               // Serial.printf("[DL] Downloaded: %d / %d\n", c, size);
                saveFile.write(buff, c);
                if (len > 0) {
                   len -= c;
@@ -1156,20 +1081,15 @@ int downloadAndSaveFile(String fileName, String url) {
             }
          }
          systemFileSize = saveFile.size();
-         Serial.print("[FLASH] File size: ");
-         Serial.println(systemFileSize);
-         Serial.print("[DL] File Diff: ");
          int dif = systemFileSize - httpFileSize;
-         Serial.println(dif);
          int maxDif = (httpFileSize / 80) * -1;
          if (maxDif > -2000) {
             maxDif = -5000;
          }
-         Serial.print("[DL] MAX Diff: ");
-         Serial.println(maxDif);
+         Serial.printf("[FLASH] Final Size: %d (Diff:%d/%d).\n", systemFileSize, dif, maxDif);
          free(buff);
          if (dif < maxDif) {
-            success = -8;
+            // success = -8;
          }
          saveFile.close();
       }
@@ -1179,62 +1099,6 @@ int downloadAndSaveFile(String fileName, String url) {
    }
    http.end();
    return success;
-}
-
-uint16_t getColor(uint8_t color) {
-   switch (color) {
-      case 0:
-         return GxEPD_BLACK;
-         break;
-      case 1:
-         return GxEPD_BLUE;
-         break;
-      case 2:
-         return GxEPD_GREEN;
-         break;
-      case 3:
-         return GxEPD_RED;
-         break;
-      case 4:
-         return GxEPD_RED;  // TODO: GxEPD_RED is used for orange in epd7 (but needs to be proper dithering)
-         break;
-      case 5:
-         return GxEPD_YELLOW;
-         break;
-      case 6:
-         return GxEPD_WHITE;
-         break;
-      default:
-         return GxEPD_WHITE;
-         break;
-   }
-}
-
-bool waitDisplayComplete(bool quick) {
-   int counter = 0;
-   while (counter < 20) {
-      counter++;
-      if (quick) counter = 21;
-      bool pinState = digitalRead(BUSY_PIN);
-      if (pinState) {
-         return true;
-         break;
-      }
-#if DEBUG
-      Serial.println("[EPD] Wait for Display...");
-#endif
-      delay(500);
-   }
-   return false;
-}
-
-void printQRBlock(uint16_t x, uint16_t y, uint8_t size, uint16_t col)
-// Draw a square block of size pixels. Drawing individual pixels as this is faster
-// that line segments and much faster that a filled rectangle.
-{
-   for (uint8_t i = 0; i < size; i++)
-      for (uint8_t j = 0; j < size; j++)
-         display.drawPixel(x + i, y + j, col);
 }
 
 // https://github.com/zenmanenergy/ESP8266-Arduino-Examples/blob/master/helloWorld_urlencoded/urlencode.ino
@@ -1332,112 +1196,6 @@ void debugFS() {
 #endif
 }
 
-void displayOverlays(DisplayType& display, displayInfo displayData, bool invertColors, bool fullcolor) {
-   int16_t tw = 0;
-   int foreGround = GxEPD_WHITE_I;
-   int backGround = GxEPD_BLACK_I;
-   if (fullcolor) {
-      foreGround = GxEPD_WHITE;
-      backGround = GxEPD_BLACK;
-   }
-   if (invertColors) {
-      // invert again
-      int tempStore = foreGround;
-      foreGround = backGround;
-      backGround = tempStore;
-   }
-   char charBuffer[128];
-   char charBuffer2[128];
-   int pos = 0;
-
-   if (displayData.deviceInfoString) {
-      int deviceIdPos = 20;
-
-      u8g2_for_adafruit_gfx.setForegroundColor(backGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(foreGround);  // apply Adafruit GFX color
-
-      sprintf(charBuffer, "ID: %s", CLIENT_ID);
-      String wifiSSID = WiFi.SSID();
-      if (wifiSSID.length() > 1) {
-         sprintf(charBuffer2, "%s WiFi: %s", charBuffer, wifiSSID.c_str());
-         sprintf(charBuffer, "%s", charBuffer2);
-
-      } else {
-         sprintf(charBuffer2, "%s WiFi: NOT SET", charBuffer);
-         sprintf(charBuffer, "%s", charBuffer2);
-      }
-
-      u8g2_for_adafruit_gfx.setFont(FONT_INFO);                                         // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);                              // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, EPD_WIDTH - deviceIdPos);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(charBuffer);
-   }
-
-   if (displayData.batteryLowBig) {
-      int batteryLowPos = 500;
-
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);               // extended font
-      u8g2_for_adafruit_gfx.setFontMode(1);                  // use u8g2 transparent mode (this is default)
-
-      sprintf(charBuffer, "BATTERY LOW");
-      int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);                                   // text box width
-      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();                                            // positive
-      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();                                           // negative; in mathematicians view
-      int16_t th = ta - td;                                                                          // text box height
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, (EPD_WIDTH + batteryLowPos - th) / 2);  // start writing at this position
-      display.fillRect((EPD_HEIGHT - tw) / 2 - 2, (EPD_WIDTH + batteryLowPos - th) / 2 - 20, tw + 5, 25, backGround);
-      u8g2_for_adafruit_gfx.print(charBuffer);
-   }
-
-   // Version Display bottom right
-   if (displayData.version) {
-      u8g2_for_adafruit_gfx.setFont(FONT_VERSION);           // extended font
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-
-      sprintf(charBuffer, "%s", SOFTWARE_VERSION);
-#if DEBUG
-      sprintf(charBuffer2, "DEV: %s", charBuffer);
-      sprintf(charBuffer, "%s", charBuffer2);
-#endif
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);  // text box width
-      display.fillRect(EPD_HEIGHT - tw - 2 - pos, EPD_WIDTH - 7, tw + 3, 8, backGround);
-      u8g2_for_adafruit_gfx.setCursor(EPD_HEIGHT - tw - 1 - pos, EPD_WIDTH - 1);
-      u8g2_for_adafruit_gfx.print(charBuffer);
-      pos = pos + 60;
-   }
-   if (displayData.batteryInfo) {
-      u8g2_for_adafruit_gfx.setFont(FONT_VERSION);           // extended font
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      systemData.vddValue = readVDD(false);
-
-      sprintf(charBuffer, "Bat: %dV", systemData.vddValue);
-
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);  // text box width
-      display.fillRect(EPD_HEIGHT - tw - 2 - pos, EPD_WIDTH - 7, tw + 3, 8, backGround);
-      u8g2_for_adafruit_gfx.setCursor(EPD_HEIGHT - tw - 1 - pos, EPD_WIDTH - 1);
-      u8g2_for_adafruit_gfx.print(charBuffer);
-      pos = pos + 60;
-   }
-
-   if (displayData.wifiSignal) {
-      u8g2_for_adafruit_gfx.setFont(FONT_VERSION);           // extended font
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      int wifiSignal = WiFi.RSSI();
-
-      sprintf(charBuffer, "WiFi Sig: %d", wifiSignal);
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);  // text box width
-      display.fillRect(EPD_HEIGHT - tw - 2 - pos, EPD_WIDTH - 7, tw + 3, 8, backGround);
-      u8g2_for_adafruit_gfx.setCursor(EPD_HEIGHT - tw - 1 - pos, EPD_WIDTH - 1);
-      u8g2_for_adafruit_gfx.print(charBuffer);
-      pos = pos + 60;
-   }
-}
-
 int loadImageFromWeb(String url, String fileName) {
    if (url.length() < 1)
       return -2;
@@ -1487,776 +1245,6 @@ bool getVersionUpdate(void) {
       }
    }
    return isUpdate;
-}
-
-int setImageFromFS(String fileName) {
-   epaperIsUpdating = true;
-   saveFile = SerialFlash.open(fileName.c_str());
-   if (!saveFile) {
-      Serial.println("File missing");
-   }
-   saveFile.seek(0);
-
-   unsigned char buffer2[4];
-   saveFile.read(buffer2, 4);
-
-   uint16_t width = (buffer2[1] << 8) | (buffer2[0] & 0xff);
-   uint16_t height = (buffer2[3] << 8) | (buffer2[2] & 0xff);
-
-   Serial.printf("[BMP] Image H: %d W: %d \n", height, width);
-
-   if (width > EPD_WIDTH || height > EPD_HEIGHT) {
-      Serial.printf("[BMP] Image too wide or tall!");
-      return -1;
-   }
-
-   // wipe if this setting is on
-   if (settings.clearscreen && settings.lut != "default") {
-      displayWipe(false);
-      delay(2000);
-   }
-
-   // auto center image
-   int img_x0 = (EPD_WIDTH - width) / 2;
-   int img_y0 = (EPD_HEIGHT - height) / 2;
-   int bufferSize = (width / 2);
-   unsigned char buffer[bufferSize + 2];
-
-   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-   display.init(115200);
-   display.setRotation(displaySettings.rotationPicture);
-   display.setFullWindow();
-   Serial.print("[EPD] Update Display... \n");
-   display.firstPage();
-   do {
-      bool skiplast = false;
-      int counter = OFFSET_BITMAP;
-      saveFile.seek(counter);
-      // runonce = true;
-      // display.fillRect(0, 0, EPD_WIDTH, EPD_HEIGHT, GxEPD_WHITE);
-      display.fillScreen(GxEPD_WHITE);
-      for (int i = 0; i < height; i++) {
-         saveFile.read(buffer, bufferSize);
-         if (width % 2) {
-            if (!skiplast) {
-               counter = counter + bufferSize + 2;
-            } else {
-               counter = counter + bufferSize - 1;
-            }
-         } else {
-            counter = counter + bufferSize;
-         }
-         saveFile.seek(counter);
-
-         for (int j = 0; j < width; j++) {
-            int x = j;
-            int y = i;
-            int pos = 0;
-            if (width % 2) {
-               pos = floor(j / 2);
-               if (!skiplast && x >= 3) {
-                  x = x - 3;
-               }
-            } else {
-               pos = j / 2;
-            }
-
-            if (j % 2) {
-               uint8_t low = buffer[pos] & 0x0F;
-               display.drawPixel(x + img_x0, y + img_y0, getColor(low));
-
-            } else {
-               uint8_t high = buffer[pos] >> 4;
-               display.drawPixel(x + img_x0, y + img_y0, getColor(high));
-            }
-
-            if (width % 2 && j == width - 1 && skiplast == false) {
-               uint8_t low = buffer[pos] & 0x0F;
-               display.drawPixel(0 + img_x0, y + img_y0 + 1, getColor(low));
-               skiplast = true;
-            } else if (width % 2 && skiplast && j == width - 1) {
-               skiplast = false;
-            }
-         }
-      }
-
-      char charBuffer[128];
-      u8g2_for_adafruit_gfx.setFontDirection(1);  // left to right (this is default)
-      u8g2_for_adafruit_gfx.setFontMode(1);       // use u8g2 transparent mode (this is default)
-
-      if (displayInfos.batteryLowBig && settings.showBatteryWarning) {
-         int batteryLowPos = -500;
-         u8g2_for_adafruit_gfx.setForegroundColor(GxEPD_WHITE);  // apply Adafruit GFX color
-         u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_BLACK);  // apply Adafruit GFX color
-         u8g2_for_adafruit_gfx.setFont(FONT_BIG);                // extended font
-         sprintf(charBuffer, "BATTERY LOW");
-         int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);                                   // text box width
-         int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();                                            // positive
-         int16_t td = u8g2_for_adafruit_gfx.getFontDescent();                                           // negative; in mathematicians view
-         int16_t th = ta - td;                                                                          // text box height
-         u8g2_for_adafruit_gfx.setCursor((EPD_WIDTH + batteryLowPos - th) / 2, (EPD_HEIGHT - tw) / 2);  // start writing at this position
-         display.fillRect((EPD_WIDTH + batteryLowPos - th) / 2 - 4, (EPD_HEIGHT - tw) / 2 - 2, 25, tw + 7, GxEPD_BLACK);
-         u8g2_for_adafruit_gfx.print(charBuffer);
-
-         // sprintf(charBuffer, "BATTERY LOW");
-         // int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);  // text box width
-         // display.fillRect(0, (EPD_HEIGHT - tw) / 2, 9, tw + 5, GxEPD_RED);
-         // u8g2_for_adafruit_gfx.setCursor(1, (EPD_HEIGHT - tw) / 2);
-         // u8g2_for_adafruit_gfx.print(charBuffer);
-      }
-      if (displayInfos.wifiOfflineBig && settings.showWifiWarning) {
-         int noWifiPos = -560;
-         u8g2_for_adafruit_gfx.setForegroundColor(GxEPD_WHITE);  // apply Adafruit GFX color
-         u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_BLACK);  // apply Adafruit GFX color
-         u8g2_for_adafruit_gfx.setFont(FONT_BIG);                // extended font
-         sprintf(charBuffer, "NO WIFI CONNECTION");
-         int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);                               // text box width
-         int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();                                        // positive
-         int16_t td = u8g2_for_adafruit_gfx.getFontDescent();                                       // negative; in mathematicians view
-         int16_t th = ta - td;                                                                      // text box height
-         u8g2_for_adafruit_gfx.setCursor((EPD_WIDTH + noWifiPos - th) / 2, (EPD_HEIGHT - tw) / 2);  // start writing at this position
-         display.fillRect((EPD_WIDTH + noWifiPos - th) / 2 - 4, (EPD_HEIGHT - tw) / 2 - 2, 25, tw + 7, GxEPD_BLACK);
-         u8g2_for_adafruit_gfx.print(charBuffer);
-      }
-#if DEBUG
-      u8g2_for_adafruit_gfx.setFont(FONT_VERSION);            // extended font
-      u8g2_for_adafruit_gfx.setForegroundColor(GxEPD_WHITE);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_RED);    // apply Adafruit GFX color
-      sprintf(charBuffer, "DEV: %s", SOFTWARE_VERSION);
-      int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(charBuffer);  // text box width
-      display.fillRect(0, EPD_HEIGHT - tw - 3, 9, tw + 5, GxEPD_RED);
-      u8g2_for_adafruit_gfx.setCursor(1, EPD_HEIGHT - tw - 1);
-      u8g2_for_adafruit_gfx.print(charBuffer);
-#endif
-#if DEBUG
-/*
-      u8g2_for_adafruit_gfx.setFontDirection(0);  // left to right (this is default)
-      u8g2_for_adafruit_gfx.setFontMode(1);       // use u8g2 transparent mode (this is default)
-
-      displayInfo displayInfoPicture = displayInfos;
-      displayInfoPicture.version = true;
-      displayInfoPicture.batteryInfo = true;
-      displayInfoPicture.wifiSignal = true;
-      displayInfoPicture.deviceInfoString = true;
-
-      displayOverlays(display, displayInfoPicture, false, true);
-      */
-#endif
-   } while (display.nextPage());
-   Serial.println("[EPD] End Draw...");
-   epaperIsUpdating = false;
-   return 0;
-}
-void displayDebugInfo() {
-   int textLines = 11;
-   String info[textLines];
-   if (deviceActivated || deviceActivationNotStarted || deviceActivationReset) {
-      info[0] = "AWS Connection: OK";
-   } else {
-      info[0] = "AWS Connection: FAIL";
-   }
-   String ssidRead = readStringFromFlash(0);
-   String pwRead = readStringFromFlash(40);
-   int wifiSignal = WiFi.RSSI();
-   systemData.vddValue = readVDD(false);
-   bool isUsb = usbCheckConnect();
-   int accTest = accInit();
-
-   // test flash
-   int buffLen = 4;
-   char testbuff[buffLen] = {'a', 'b', '1', '2'};
-   char testbuffread[buffLen];
-   SerialFlashFile saveFileTest;
-   SerialFlashFile saveFileTestRead;
-   if (SerialFlash.exists("testfile")) {
-      Serial.println("[FLASH] Test File delete");
-      SerialFlashFile file = SerialFlash.open("testfile");
-      file.erase();
-      saveFileTest.close();
-   }
-   SerialFlash.createErasable("testfile", 4);
-   saveFileTest = SerialFlash.open("testfile");
-   saveFileTest.write(testbuff, buffLen);
-   saveFileTest.close();
-   int testFileSize = saveFileTest.size();
-   saveFileTestRead = SerialFlash.open("testfile");
-   saveFileTestRead.seek(0);
-   saveFileTestRead.read(testbuffread, 4);
-   saveFileTestRead.close();
-
-   info[1] = "";
-
-   info[2] = "Device Status:";
-   info[3] = "Activated: " + String(deviceActivated) + " NotStarted: " + String(deviceActivationNotStarted) + " Reset: " + String(deviceActivationReset);
-   info[4] = "OTA URL: " + String(OTA_URL);
-   info[5] = "DEV OTA URL: " + String(OTA_URL_DEV);
-   info[6] = "";
-
-   info[7] = "Flash:";
-   info[8] = "Activated: " + String(getActivatedFromMem()) + " ActCount: " + String(readIntFromFlash(170)) + " FileVers: " + String(readIntFromFlash(150)) + " TestFile: " + String(testbuffread);
-   info[9] = "SSID: " + ssidRead + " PW: " + pwRead;
-   info[10] = "LINK: " + String(wifiSignal) + " BAT: " + String(systemData.vddValue) + "V USB: " + String(isUsb) + " ACC: " + String(accTest);
-   Serial.println("[TEST] START");
-   for (int i = 0; i < textLines; i++) {
-      Serial.println(info[i]);
-   }
-   Serial.println("[TEST] END");
-
-   String info1 = "Ich schlafe ...";
-   String info2 = "Drücke die Taste auf der Rückseite";
-   String info3 = "um mich zu wecken.";
-
-   char msg[128];
-   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=99");
-
-   uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
-   uint8_t blockSize;
-   uint8_t page = 0;
-   qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
-   blockSize = 2;
-   uint16_t x0 = (EPD_HEIGHT - 30 * blockSize) / 2;
-   uint16_t y0 = 680;
-
-   int foreGround = GxEPD_WHITE_I;
-   int backGround = GxEPD_BLACK_I;
-   bool fullColor = false;
-
-   Serial.print(F("\n[EPD] Press to turn on Screen Loading - "));
-   if (displaySettings.quickRefresh) {
-      display.init(115200);
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   } else {
-      display.enableQuickRefresh(0, false);
-      display.init(115200);
-      foreGround = GxEPD_WHITE;
-      backGround = GxEPD_BLACK;
-      fullColor = true;
-   }
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   // Display 600*448
-   do {
-      int16_t tw = 0;
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, backGround);
-      display.fillRect(2, 2, EPD_HEIGHT - 4, EPD_WIDTH - 4, foreGround);
-      display.fillRect(4, 4, EPD_HEIGHT - 8, EPD_WIDTH - 8, backGround);
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setFontDirection(0);             // left to right (this is default)
-      u8g2_for_adafruit_gfx.setFontMode(1);                  // use u8g2 transparent mode (this is default)
-
-      display.fillRect(x0 + 2, y0 + 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, foreGround);
-
-      // For each vertical module
-      for (uint8_t y = 0; y < QR.size; y++) {
-         // Eor each horizontal module
-         for (uint8_t x = 0; x < QR.size; x++) {
-            if (qrcode_getModule(&QR, x, y))
-               printQRBlock(x0 + (x * blockSize) + QR_QUIET_ZONE,
-                            y0 + (y * blockSize) + QR_QUIET_ZONE,
-                            blockSize,
-                            (qrcode_getModule(&QR, x, y)) ? backGround : foreGround);
-         }
-      }
-
-      u8g2_for_adafruit_gfx.setFont(FONT_MAIN);  // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info1.c_str());
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 300);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info1);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);                      // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info2.c_str());       // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 370);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info2);                           // UTF-8 string: "<" 550 448 664 ">"
-
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info3.c_str());       // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 395);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info3);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                   // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("I am sleeping...");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);  // start writing at this position
-      u8g2_for_adafruit_gfx.print("I am sleeping...");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                               // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Press the button on the back to wake me up.");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                             // start writing at this position
-      u8g2_for_adafruit_gfx.print("Press the button on the back to wake me up.");
-
-   } while (display.nextPage());
-}
-void displaySetText(String info, bool isBlackboard, bool quickRefresh) {
-   int foreGround = GxEPD_BLACK_I;
-   int backGround = GxEPD_WHITE_I;
-   int fill = GxEPD_WHITE_I;
-   bool invert = false;
-   bool fullcolor = false;
-   if (isBlackboard) {
-      invert = true;
-      foreGround = GxEPD_WHITE_I;
-      backGround = GxEPD_BLACK_I;
-      fill = GxEPD_BLACK_I;
-   }
-   if (!displaySettings.quickRefresh) {
-      quickRefresh = false;
-   }
-   if (quickRefresh) {
-      fullcolor = false;
-      display.init(115200);
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   } else {
-      if (isBlackboard) {
-         foreGround = GxEPD_WHITE;
-         backGround = GxEPD_BLACK;
-         fill = GxEPD_BLACK;
-      } else {
-         foreGround = GxEPD_BLACK;
-         backGround = GxEPD_WHITE;
-         fill = GxEPD_WHITE;
-      }
-      fullcolor = true;
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-      display.init(115200);
-   }
-
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   do {
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, fill);
-      u8g2_for_adafruit_gfx.setFontDirection(0);             // left to right (this is default)
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);  // extended font
-      u8g2_for_adafruit_gfx.setFontMode(1);     // use u8g2 transparent mode (this is default)
-
-      int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(info.c_str());                 // text box width
-      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();                            // positive
-      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();                           // negative; in mathematicians view
-      int16_t th = ta - td;                                                          // text box height
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, (EPD_WIDTH - th) / 2);  // start writing at this position
-
-      u8g2_for_adafruit_gfx.print(info);
-      if (info.length() > 1) {
-         displayInfos.deviceInfoString = true;
-      }
-
-      displayOverlays(display, displayInfos, invert, fullcolor);
-
-   } while (display.nextPage());
-}
-
-void displayOtaScreen() {
-   Serial.print(F("[EPD] OTA Screen loading - \n"));
-
-   int foreGround = GxEPD_WHITE_I;
-   int backGround = GxEPD_BLACK_I;
-   bool fullColor = false;
-
-   if (displaySettings.quickRefresh) {
-      display.init(115200);
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   } else {
-      display.enableQuickRefresh(0, false);
-      display.init(115200);
-      foreGround = GxEPD_WHITE;
-      backGround = GxEPD_BLACK;
-      fullColor = true;
-   }
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   // Display 600*448
-   do {
-      u8g2_for_adafruit_gfx.setFontDirection(0);  // left to right (this is default)
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, backGround);
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setFontMode(1);                  // use u8g2 transparent mode (this is default)
-
-      u8g2_for_adafruit_gfx.setFont(FONT_MAIN);  // extended font
-      int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width("Software Update...");
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 190);  // start writing at this position
-      u8g2_for_adafruit_gfx.print("Software Update...");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);                                         // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Bitte schalte den Rahmen nicht aus.");  // text box width
-      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();                              // positive
-      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();                             // negative; in mathematicians view
-      int16_t th = ta - td;                                                            // text box height
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, (EPD_WIDTH - th) / 2);    // start writing at this position
-      u8g2_for_adafruit_gfx.print("Bitte schalte den Rahmen nicht aus.");
-
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Das Update dauert etwa 45 Sekunden.");       // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) + 19);  // start writing at this position
-      u8g2_for_adafruit_gfx.print("Das Update dauert etwa 45 Sekunden.");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                    // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Updating Software");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);   // start writing at this position
-      u8g2_for_adafruit_gfx.print("Updating Software");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                                                           // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Please do not turn off the device. The Update takes approx. 45 seconds.");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                                                         // start writing at this position
-      u8g2_for_adafruit_gfx.print("Please do not turn off the device. The Update takes approx. 45 seconds.");              // UTF-8 string: "<" 550 448 664 ">"
-
-      displayOverlays(display, displayInfos, true, fullColor);
-
-   } while (display.nextPage());
-}
-
-void displayNoPicture() {
-   String info = "Bitte aktualisiere ein Bild in der App.";
-   String info2 = "Aktivierung";
-   String info3 = "abgeschlossen";
-
-   Serial.print(F("[EPD] No Picture Screen Loading - \n"));
-
-   int foreGround = GxEPD_BLACK_I;
-   int backGround = GxEPD_WHITE_I;
-   bool fullColor = false;
-
-   if (displaySettings.quickRefresh) {
-      display.init(115200);
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   } else {
-      display.enableQuickRefresh(0, false);
-      display.init(115200);
-      foreGround = GxEPD_BLACK;
-      backGround = GxEPD_WHITE;
-      fullColor = true;
-   }
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   // Display 600*448
-   do {
-      u8g2_for_adafruit_gfx.setFontDirection(0);  // left to right (this is default)
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, backGround);
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setFontMode(1);                  // use u8g2 transparent mode (this is default)
-
-      u8g2_for_adafruit_gfx.setFont(FONT_MAIN);  // extended font
-      int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(info2.c_str());
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 150);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info2);
-
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info3.c_str());
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 190);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info3);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);                                       // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info.c_str());                         // text box width
-      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();                            // positive
-      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();                           // negative; in mathematicians view
-      int16_t th = ta - td;                                                          // text box height
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, (EPD_WIDTH - th) / 2);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                        // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Activation Successful");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);       // start writing at this position
-      u8g2_for_adafruit_gfx.print("Activation Successful");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                        // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Please update a picture in your App.");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                      // start writing at this position
-      u8g2_for_adafruit_gfx.print("Please update a picture in your App.");              // UTF-8 string: "<" 550 448 664 ">"
-
-      displayOverlays(display, displayInfos, false, fullColor);
-
-   } while (display.nextPage());
-}
-
-void displayTurnOn() {
-   String info = "Ich schlafe ...";
-   String info2 = "Drücke die Taste auf der Rückseite";
-   String info3 = "um mich zu wecken.";
-
-   char msg[128];
-   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=99");
-
-   uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
-   uint8_t blockSize;
-   uint8_t page = 0;
-   qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
-   blockSize = 2;
-   uint16_t x0 = (EPD_HEIGHT - 30 * blockSize) / 2;
-   uint16_t y0 = 680;
-
-   int foreGround = GxEPD_WHITE_I;
-   int backGround = GxEPD_BLACK_I;
-   bool fullColor = false;
-
-   Serial.print(F("\n[EPD] Press to turn on Screen Loading - "));
-   if (displaySettings.quickRefresh) {
-      display.init(115200);
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   } else {
-      display.enableQuickRefresh(0, false);
-      display.init(115200);
-      foreGround = GxEPD_WHITE;
-      backGround = GxEPD_BLACK;
-      fullColor = true;
-   }
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   // Display 600*448
-   do {
-      int16_t tw = 0;
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, backGround);
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setFontDirection(0);             // left to right (this is default)
-      u8g2_for_adafruit_gfx.setFontMode(1);                  // use u8g2 transparent mode (this is default)
-
-      display.fillRect(x0 + 2, y0 + 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, foreGround);
-
-      // For each vertical module
-      for (uint8_t y = 0; y < QR.size; y++) {
-         // Eor each horizontal module
-         for (uint8_t x = 0; x < QR.size; x++) {
-            if (qrcode_getModule(&QR, x, y))
-               printQRBlock(x0 + (x * blockSize) + QR_QUIET_ZONE,
-                            y0 + (y * blockSize) + QR_QUIET_ZONE,
-                            blockSize,
-                            (qrcode_getModule(&QR, x, y)) ? backGround : foreGround);
-         }
-      }
-
-      u8g2_for_adafruit_gfx.setFont(FONT_MAIN);  // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info.c_str());
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 300);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);                      // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info2.c_str());       // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 370);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info2);                           // UTF-8 string: "<" 550 448 664 ">"
-
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info3.c_str());       // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 395);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info3);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                   // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("I am sleeping...");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);  // start writing at this position
-      u8g2_for_adafruit_gfx.print("I am sleeping...");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                               // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Press the button on the back to wake me up.");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                             // start writing at this position
-      u8g2_for_adafruit_gfx.print("Press the button on the back to wake me up.");
-
-      displayOverlays(display, displayInfos, true, fullColor);
-
-   } while (display.nextPage());
-}
-
-void displayUpdatePicture() {
-   String info = "Bild wird aktualisiert";
-   String info2 = "bitte warten...";
-
-   Serial.print(F("[EPD] update pending Screen Loading\n"));
-   display.init(115200);
-   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   // Display 600*448
-   do {
-      u8g2_for_adafruit_gfx.setFontDirection(0);  // left to right (this is default)
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, GxEPD_BLACK_I);
-      u8g2_for_adafruit_gfx.setForegroundColor(GxEPD_WHITE_I);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_BLACK_I);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setFontMode(1);                     // use u8g2 transparent mode (this is default)
-
-      u8g2_for_adafruit_gfx.setFont(FONT_MAIN);                       // extended font
-      int16_t tw = u8g2_for_adafruit_gfx.getUTF8Width(info.c_str());  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 300);    // start writing at this position
-      u8g2_for_adafruit_gfx.print(info);                              // UTF-8 string: "<" 550 448 664 ">"
-
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);                      // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info2.c_str());       // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 370);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info2);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                   // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Updating Picture");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);  // start writing at this position
-      u8g2_for_adafruit_gfx.print("Updating Picture");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                     // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Please be patient");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);   // start writing at this position
-      u8g2_for_adafruit_gfx.print("Please be patient...");           // UTF-8 string: "<" 550 448 664 ">"
-
-      displayOverlays(display, displayInfos, true);
-   } while (display.nextPage());
-}
-
-void displayWifiActivate(bool wifiProvisioningDone) {
-   // Paged display of the QR code with top left corner at (x0,y0)
-   // on the display
-
-   char msg[128];
-   sprintf(msg, "%s%s%s%s", "https://paperlesspaper.de/b?d=", CLIENT_ID, "&w=", wifiProvisioningDone ? "1" : "0");
-
-   uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
-   uint8_t blockSize;
-   uint8_t page = 0;
-   // QR Code 5*30 = 150px
-
-   qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
-   // blockSize = (display.height() - (2 * QR_QUIET_ZONE)) / QR.size;
-   blockSize = 8;
-
-   uint16_t x0 = (EPD_HEIGHT - 30 * blockSize) / 2;
-   uint16_t y0 = 50;
-
-   int foreGround = GxEPD_BLACK_I;
-   int backGround = GxEPD_WHITE_I;
-   bool fullColor = false;
-
-   if (DEBUG_FLAG) Serial.printf("[EPD] Wifi Activate Function: %d\n", wifiProvisioningDone);
-   Serial.printf("[EPD] QR Size: %d | Locate: %d,%d | DispH: %d \n", QR.size, x0, y0, display.height());
-   Serial.printf("[EPD] QR Block: %d | Data: %s \n", blockSize, msg);
-
-   if (displaySettings.quickRefresh) {
-      display.init(115200);
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   } else {
-      display.enableQuickRefresh(0, false);
-      display.init(115200);
-      foreGround = GxEPD_BLACK;
-      backGround = GxEPD_WHITE;
-      fullColor = true;
-   }
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   // Display 600*448
-   do {
-      int16_t tw = 0;
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, backGround);
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);  // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);  // apply Adafruit GFX color
-      display.fillRect(x0, y0, QR.size * blockSize + QR_QUIET_ZONE + blockSize, QR.size * blockSize + QR_QUIET_ZONE + blockSize, backGround);
-
-      // For each vertical module
-      for (uint8_t y = 0; y < QR.size; y++) {
-         // Eor each horizontal module
-         for (uint8_t x = 0; x < QR.size; x++) {
-            if (qrcode_getModule(&QR, x, y))
-               printQRBlock(x0 + (x * blockSize) + QR_QUIET_ZONE,
-                            y0 + (y * blockSize) + QR_QUIET_ZONE,
-                            blockSize,
-                            (qrcode_getModule(&QR, x, y)) ? foreGround : backGround);
-         }
-      }
-      u8g2_for_adafruit_gfx.setFontMode(1);  // use u8g2 transparent mode (this is default)
-
-      if (wifiProvisioningDone) {
-         u8g2_for_adafruit_gfx.setFont(FONT_MAIN);                     // extended font
-         tw = u8g2_for_adafruit_gfx.getUTF8Width("Gerät aktivieren");  // text box width
-         u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 360);  // start writing at this position
-         u8g2_for_adafruit_gfx.print("Gerät aktivieren");
-      } else {
-         u8g2_for_adafruit_gfx.setFont(FONT_MAIN);                     // extended font
-         tw = u8g2_for_adafruit_gfx.getUTF8Width("WLAN verbinden");    // text box width
-         u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 360);  // start writing at this position
-         u8g2_for_adafruit_gfx.print("WLAN verbinden");
-      }
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                                                   // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("1. Scanne den QR Code um die App zu installieren");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 400);                                  // start writing at this position
-      u8g2_for_adafruit_gfx.print("1. Scanne den QR Code um die App zu installieren");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                                    // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("2. Folge den Schritten in der App");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 420);                   // start writing at this position
-      u8g2_for_adafruit_gfx.print("2. Folge den Schritten in der App");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                   // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Connecting WiFi");   // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560);  // start writing at this position
-      u8g2_for_adafruit_gfx.print("Connecting WiFi");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                     // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Scan the QR code or open the App.");  // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                   // start writing at this position
-      u8g2_for_adafruit_gfx.print("Scan the QR code or open the App.");
-
-      displayOverlays(display, displayInfos, false, fullColor);
-
-   } while (display.nextPage());
-
-   // Serial.print(F("\nEnd"));
-}
-
-void displayWipe(bool quick) {
-   int fill = GxEPD_WHITE;
-
-   if (quick) {
-      display.init(115200);
-      display.enableQuickRefresh(5200, true);
-      fill = GxEPD_WHITE_I;
-   } else {
-      display.init(115200);
-      display.enableQuickRefresh(5200, false);
-      fill = GxEPD_WHITE;
-   }
-   display.setRotation(1);
-   display.firstPage();
-   do {
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, fill);
-   } while (display.nextPage());
-}
-
-void displaySetBlankTest(int offsetVar, bool doQuickRefresh) {
-   Serial.println("[EPD] Set Display to Empty");
-   display.init(115200);
-   if (doQuickRefresh) {
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   } else {
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-   }
-
-   u8g2_for_adafruit_gfx.setFontDirection(0);  // left to right (this is default)
-   display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, GxEPD_BLACK);
-   u8g2_for_adafruit_gfx.setForegroundColor(GxEPD_BLACK_I);  // apply Adafruit GFX color
-   u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_WHITE_I);  // apply Adafruit GFX color
-   u8g2_for_adafruit_gfx.setFont(FONT_BIG);                  // extended font
-   u8g2_for_adafruit_gfx.setFontMode(1);                     // use u8g2 transparent mode (this is default)
-   display.setRotation(1);
-
-   int offset = offsetVar * 40;
-   int offset2 = offsetVar * 20;
-
-   display.firstPage();
-   do {
-      display.fillRect(0, 0, EPD_HEIGHT, EPD_WIDTH, GxEPD_BLACK);
-      display.fillRect(2, 2, EPD_HEIGHT - 4, EPD_WIDTH - 4, GxEPD_WHITE);
-      display.fillRect(5, 5, EPD_HEIGHT - 10, EPD_WIDTH - 10, GxEPD_BLACK);
-      display.fillRect(8, 8, EPD_HEIGHT - 16, EPD_WIDTH - 16, GxEPD_WHITE);
-      //  Space all around
-      //  display.fillRect(0, 0, EPD_WIDTH, EPD_HEIGHT, GxEPD_WHITE);
-      display.fillRect(40, offset, 40, 40, GxEPD_BLACK);
-      display.fillRect(80, offset, 40, 40, GxEPD_BLUE);
-      display.fillRect(120, offset, 40, 40, GxEPD_GREEN);
-      display.fillRect(160, offset, 40, 40, GxEPD_RED);
-      display.fillRect(200, offset, 40, 40, GxEPD_ORANGE);
-      display.fillRect(240, offset, 40, 40, GxEPD_YELLOW);
-
-      display.fillRect(300, offset2, 20, 20, GxEPD_BLACK);
-      display.fillRect(320, offset2, 20, 20, GxEPD_BLUE);
-      display.fillRect(340, offset2, 20, 20, GxEPD_GREEN);
-      display.fillRect(360, offset2, 20, 20, GxEPD_RED);
-      display.fillRect(380, offset2, 20, 20, GxEPD_ORANGE);
-      display.fillRect(400, offset2, 20, 20, GxEPD_YELLOW);
-      display.fillRect(421, offset2, 20, 20, GxEPD_YELLOW);
-
-      // display.setCursor(220, 100 + offset2);
-      // display.println(info);
-   } while (display.nextPage());
 }
 
 String setLeadingZero(String input) {
@@ -2568,11 +1556,66 @@ bool getImageUrl(bool reset) {
       return false;
    }
 }
+
+void printDebugInfo() {
+   int textLines = 11;
+   String info[textLines];
+   if (deviceActivated || deviceActivationNotStarted || deviceActivationReset) {
+      info[0] = "AWS Connection: OK";
+   } else {
+      info[0] = "AWS Connection: FAIL";
+   }
+   String ssidRead = readStringFromFlash(0);
+   String pwRead = readStringFromFlash(40);
+   int wifiSignal = WiFi.RSSI();
+   systemData.vddValue = readVDD(false);
+   bool isUsb = usbCheckConnect();
+   int accTest = accInit();
+
+   // test flash
+   int buffLen = 4;
+   char testbuff[buffLen] = {'a', 'b', '1', '2'};
+   char testbuffread[buffLen];
+   SerialFlashFile saveFileTest;
+   SerialFlashFile saveFileTestRead;
+   if (SerialFlash.exists("testfile")) {
+      Serial.println("[FLASH] Test File delete");
+      SerialFlashFile file = SerialFlash.open("testfile");
+      file.erase();
+      saveFileTest.close();
+   }
+   SerialFlash.createErasable("testfile", 4);
+   saveFileTest = SerialFlash.open("testfile");
+   saveFileTest.write(testbuff, buffLen);
+   saveFileTest.close();
+   int testFileSize = saveFileTest.size();
+   saveFileTestRead = SerialFlash.open("testfile");
+   saveFileTestRead.seek(0);
+   saveFileTestRead.read(testbuffread, 4);
+   saveFileTestRead.close();
+
+   info[1] = "";
+
+   info[2] = "Device Status:";
+   info[3] = "Activated: " + String(deviceActivated) + " NotStarted: " + String(deviceActivationNotStarted) + " Reset: " + String(deviceActivationReset);
+   info[4] = "OTA URL: " + String(OTA_URL);
+   info[5] = "DEV OTA URL: " + String(OTA_URL_DEV);
+   info[6] = "";
+
+   info[7] = "Flash:";
+   info[8] = "Activated: " + String(getActivatedFromMem()) + " ActCount: " + String(readIntFromFlash(170)) + " FileVers: " + String(readIntFromFlash(150)) + " TestFile: " + String(testbuffread);
+   info[9] = "SSID: " + ssidRead + " PW: " + pwRead;
+   info[10] = "LINK: " + String(wifiSignal) + " BAT: " + String(systemData.vddValue) + "V USB: " + String(isUsb) + " ACC: " + String(accTest);
+   Serial.println("[TEST] START");
+   for (int i = 0; i < textLines; i++) {
+      Serial.println(info[i]);
+   }
+   Serial.println("[TEST] END");
+}
 // sleep x seconds
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
-   pinMode(CS_EPD_PIN, OUTPUT);
-   pinMode(DC_PIN, OUTPUT);
+   initEpaperDisplay(SPI);
    checkOrientationInBackground(0, false);
    if (!settings.sleepDisabled) WiFi.disconnect(true);
    if (motionWake) {
@@ -2580,23 +1623,25 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    } else {
       accIntSet(0);
    }
+   // struct timeval currentTime;
+   // gettimeofday(&currentTime, NULL);
+   // previousWakeup = currentTime;  // this is important for next wakeup calculation, do not delete it.
    waitDisplayComplete(false);
    if (wakeuptimeout <= 0 && showScreen) {
       displayTurnOn();  // Ich schlafe screen
       waitDisplayComplete(true);
    }
    ledBlink(0, false);
+   deinitDisplay();
    delay(5);
-   display.hibernate();
-   delay(5);
-   // digitalWrite(RST_PIN, 0);
+   powerSupplyDisplay(false);
+   pinMode(LED_PIN, INPUT);
    Serial.flush();
    delay(10);
    if (!settings.sleepDisabled) setCpuFrequencyMhz(40);
    delay(5);
-   pinMode(RST_PIN, INPUT);
-   pinMode(CS_EPD_PIN, INPUT);
-   pinMode(DC_PIN, INPUT);
+
+   pinMode(DISP_POWER, INPUT);
    if (!settings.sleepDisabled) pinMode(LED_PIN, INPUT);
    pinMode(CS_FLASH_PIN, INPUT);
    pinMode(SCK_PIN, INPUT);
@@ -2606,8 +1651,7 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    pinMode(I2C_SCL_PIN, INPUT);
    pinMode(BAT_VOLT_EN_PIN, INPUT);
    pinMode(CHG_EN_PIN, INPUT);
-   pinMode(12, INPUT);  // USB TEST PINS
-   pinMode(13, INPUT);  // USB TEST PINS
+   pinMode(CS_SD_PIN, INPUT);
    if (settings.sleepDisabled) {
       int versionStored = newVersionSave;
       Serial.printf("[SLEEP] enter soft sleep\n");
@@ -2622,7 +1666,6 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
             ESP.restart();
             break;
          }
-
          // TODO: add watchdog feed and also add fallback. disable timeout
       }
    }
@@ -2784,8 +1827,10 @@ bool resetAll(bool resetActivation, bool resetWifi) {
 void debugCheck() {
    Serial.println("[DEBUG] Deploy State");
    resetAll(false, true);
+   setDisplayData(CLIENT_ID, systemData.vddValue);
+   printDebugInfo();
    waitDisplayComplete(false);
-   displaySettings.quickRefresh = true;
+   displaySetQuickRefresh(true);
    displayDebugInfo();
    delay(2000);
    gotToDeepSleep(DEFAULT_SLEEP, false, false);  // dont show the deep sleep screen stay with debug info
@@ -2814,7 +1859,131 @@ void flashTest() {
    while (SerialFlash.ready() == false) {
       // wait, 30 seconds to 2 minutes for most chips
    }
-   // testFlash();
+}
+void sdTest() {
+   // Test read/write
+   FsFile testFile;
+   if (testFile.open("test.txt", O_WRONLY | O_CREAT | O_TRUNC)) {
+      Serial.println("Writing to test.txt...");
+      testFile.println("Hello SD Card! This is a test of the SdFat library.");
+      testFile.close();
+      Serial.println("Write complete.");
+
+      if (testFile.open("test.txt", O_RDONLY)) {
+         Serial.println("Reading from test.txt:");
+         while (testFile.available()) {
+            Serial.write(testFile.read());
+         }
+         testFile.close();
+         Serial.println("\nRead complete.");
+      } else {
+         Serial.println("Failed to open test.txt for reading.");
+      }
+   } else {
+      Serial.println("Failed to create test.txt.");
+   }
+}
+
+bool sdInit() {
+   if (systemData.sdIsInit) return true;
+   if (!sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
+      Serial.println("[SD] mount failed, attempting to format the card...");
+      FatFormatter fatFormatter;
+      uint8_t buffer[512];
+      SdCardFactory cardFactory;
+      SdCard* m_card = cardFactory.newCard(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED));
+
+      if (!m_card || m_card->errorCode()) {
+         Serial.println("[SD] Hardware error: could not detect SD card!");
+         return false;
+      } else {
+         bool formatSuccess = fatFormatter.format(m_card, buffer, &Serial);
+         if (formatSuccess) {
+            Serial.println("Format complete! Retrying mount...");
+            if (sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
+               Serial.println("[SD] mounted successfully after format.");
+               systemData.sdIsInit = true;
+               return true;
+            } else {
+               Serial.println("[SD] mount failed even after format.");
+               return false;
+            }
+         } else {
+            Serial.println("[SD] Format failed!");
+            return false;
+         }
+      }
+   } else {
+      Serial.println("[SD] initialization done.");
+      systemData.sdIsInit = true;
+      return true;
+   }
+   return false;
+}
+
+bool copyFileFromFlashToSD(String fileName, String fileNameSD) {
+   if (!SerialFlash.exists(fileName.c_str())) {
+      Serial.printf("[COPY] Fehler: Datei %s existiert nicht im Flash.\n", fileName.c_str());
+      return false;
+   }
+
+   // Datei aus dem SerialFlash öffnen
+   SerialFlashFile flashFile = SerialFlash.open(fileName.c_str());
+   if (!flashFile) {
+      Serial.println("[COPY] Fehler: Konnte Datei im Flash nicht öffnen.");
+      return false;
+   }
+
+   FsFile sdFile;
+   if (!sdFile.open(fileNameSD.c_str(), O_WRONLY | O_CREAT | O_TRUNC)) {
+      Serial.println("[COPY] Fehler: Konnte/Wollte Zieldatei auf der SD-Karte nicht erstellen.");
+      flashFile.close();
+      return false;
+   }
+
+   const size_t buff_size = 4096;
+   unsigned char* buff = (unsigned char*)malloc(buff_size);
+   if (buff == NULL) {
+      Serial.println("[COPY] Fehler: Nicht genug RAM für den Kopierpuffer!");
+      sdFile.close();
+      flashFile.close();
+      return false;
+   }
+
+   size_t totalSize = flashFile.size();
+   size_t copiedBytes = 0;
+
+   Serial.printf("[COPY] Kopiere %s (%d Bytes) auf SD-Karte (File:%s)...\n", fileName.c_str(), totalSize, fileNameSD.c_str());
+
+   while (copiedBytes < totalSize) {
+      size_t bytesToRead = totalSize - copiedBytes;
+      if (bytesToRead > buff_size) {
+         bytesToRead = buff_size;
+      }
+
+      size_t bytesRead = flashFile.read(buff, bytesToRead);
+      if (bytesRead == 0) {
+         break;  // Sollte nicht passieren, wenn die Größe stimmt
+      }
+
+      size_t bytesWritten = sdFile.write(buff, bytesRead);
+      if (bytesWritten != bytesRead) {
+         Serial.println("[COPY] Fehler beim Schreiben auf die SD-Karte. Möglicherweise Speicher voll oder Karte entfernt.");
+         free(buff);
+         sdFile.close();
+         flashFile.close();
+         return false;
+      }
+
+      copiedBytes += bytesWritten;
+   }
+
+   free(buff);
+   sdFile.close();
+   flashFile.close();
+
+   Serial.println("[COPY] Kopieren erfolgreich abgeschlossen!");
+   return true;
 }
 
 bool usbInit() {
@@ -2946,15 +2115,12 @@ void recheckAccOrient(int setOrientValue) {
       writeIntToFlash(systemData.deviceOrientation, 220);
       writeIntToFlash(0, 150);  // Reset picture version after ota to init update
       if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
-         displaySettings.rotationText = 1;
-         displaySettings.rotationPicture = 0;
+         displaySetRotation(1);
+      } else {
+         displaySetRotation(0);
       }
-      if (epaperIsUpdating) {
-         digitalWrite(RST_PIN, 1);
-         delay(50);  // needs a little longer
-         digitalWrite(RST_PIN, 0);
-         delay(20);
-
+      if (isEpaperActive()) {
+         deinitDisplay();
          ESP.restart();
       }
    } else {
@@ -2966,6 +2132,7 @@ void checkOrientationInBackground(int setOrientValue, bool isRunning) {
    if (isRunning) {
       stopAccRecheck = false;
       Serial.printf("[ACC] Background update start\n");
+
       periodicAccCheck.attach_ms(1000, recheckAccOrient, setOrientValue);
    } else {
       Serial.printf("[ACC] Background update stop\n");
@@ -3010,43 +2177,104 @@ bool chargeMode(bool enable) {
    return isCharging;
 }
 
-// write revision in set to set it in mem. it will restored on every boot
-void checkDeviceBatch(int set = 0) {
-   if (set > 0) {
-      Serial.printf("[SETUP] write device revision to: %d\n", set);
-      writeIntToFlash(set, 195);
+// Power supply display
+#ifdef EPD_TYPE_13INCH
+bool powerSupplyDisplay(bool enable) {
+   bool tempState = systemData.displayPowerOn;
+   if (enable) {
+      pinMode(DISP_POWER, OUTPUT);
+      digitalWrite(DISP_POWER, HIGH);
+      systemData.displayPowerOn = true;
+   } else {
+      pinMode(DISP_POWER, INPUT);
+      digitalWrite(DISP_POWER, LOW);
+      systemData.displayPowerOn = false;
    }
-   int revNumber = readIntFromFlash(195);
-   if (revNumber > 10) {
-      Serial.printf("[SETUP] Reset revision number from: %d to default\n", revNumber);
-      writeIntToFlash(0, 195);
-      return;
-   }
-   if (DEBUG_FLAG) Serial.printf("[SETUP] set device revision to: %d\n", revNumber);
-   switch (revNumber) {
-      case 1:
-         displaySettings.displayQuickRefreshTime = 4450;
-         break;
-      default:
-         Serial.printf("[SETUP] set device revision to default\n");
+   if (tempState != systemData.displayPowerOn) {
+      if (enable) {
+         Serial.printf("[POWER] Supply ON\n");
+         delay(100);
+         sdInit();
+      }
+      return true;
+   } else {
+      return false;
    }
 }
+#else
+bool powerSupplyDisplay(bool enable) {
+   return false;
+}
+#endif
 
+void checkDeviceBatch(int set = 0, int useMem = false) {
+   int revNumber = 0;
+   if (set > 0) {
+      Serial.printf("[SETUP] write device revision to: %d\n", set);
+      if (useMem) {
+         writeIntToFlash(set, 195);
+      } else {
+         revNumber = set;
+      }
+   }
+   if (useMem) {
+      int revNumber = readIntFromFlash(195);
+      if (revNumber > 10) {
+         Serial.printf("[SETUP] Reset revision number from: %d to default\n", revNumber);
+         if (useMem)
+            writeIntToFlash(0, 195);
+         return;
+      }
+   }
+
+   switch (revNumber) {
+      case 1:
+         Serial.printf("[SETUP] set device to: %d (paper 13)\n", revNumber);
+         break;
+      default:
+         Serial.printf("[SETUP] set device revision to default (paper 7)\n");
+   }
+}
 void test() {
-   // adcAttachPin(14);  // Any pin that is ADC capable
+   // checkDeviceBatch(0);
+   //  adcAttachPin(14);  // Any pin that is ADC capable
    ledBlink(0, false);
    char charBuffer[128];
-   pinMode(INT_PIN, OUTPUT);
-   digitalWrite(INT_PIN, LOW);
    Serial.println("[DEBUG] Test Function");
-   //  displaySettings.displayQuickRefreshTime = 2900;//works cold
-   ledBlink(200, false);
-   displaySettings.quickRefresh = true;
-   gotToDeepSleep(0, true, false);
+   // gotToDeepSleep(86000, false, false);
+   if (powerSupplyDisplay(true)) delay(100);
+   sdInit();
+   bool quickref = true;
+   int zufallszahl = random(2, 16);
+   analogWrite(LED_PIN, 100);
+   /*
+      displaySetQuickRefresh(false);
+      displayWifiActivate(false);
+      displayWipe(true);
+      displaySetBlankTest(zufallszahl, true);
+      while (true) {};*/
+   displayOtaScreen();
+   delay(2000);
+   displaySetText("test", false, quickref);
+   delay(2000);
+   displayNoPicture();
+   delay(2000);
+   displayWifiActivate(false);
+   delay(2000);
+   displayTurnOn();
+   delay(2000);
+   displayWifiActivate(true);
+   delay(2000);
+   displaySetText("test black", true, quickref);
+   delay(2000);
+   displaySetBlankTest(zufallszahl, false);
+   displayWipe(quickref);
+   // displaySetBlankTest(2, true);
+   // setImageFromFS("tmp.gz");
+   //   copyFileFromFlashToSD("tmp.gz", "testfile.gz");
+   //   setImageFromSDDirect("testfile.gz");
+   //    setImageFromFS("tmp.gz");
 
-   int timeout;
-   timeout = calculateSleepDuration(DEFAULT_SLEEP, false, false);
-   Serial.printf("time to next update: %d\n", timeout);
    while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
@@ -3055,6 +2283,33 @@ void test() {
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
    };
+
+   displaySetQuickRefresh(true);
+   displaySetRotation(0);
+
+   setImageFromFS("tmp.gz");
+
+   while (true) {
+      delay(5000);
+   }
+
+   displayWifiActivate(false);
+   delay(10000);
+   displayOtaScreen();
+   delay(10000);
+   // WiFi.setSleep(true);
+   // WiFi.disconnect(true);
+   // setCpuFrequencyMhz(40);
+   delay(5);
+   // displaySetBlankTest(0, true);
+
+   displaySetQuickRefresh(false);
+   displayWifiActivate(false);
+   // sdTest();
+   ledBlink(500, true, LED_DIM_VALUE);
+   // gotToDeepSleep(600, true, false);
+   //  displayOtaScreen();
+
    gotToDeepSleep(60, false, true);
 
    // display.powerOff();
@@ -3063,21 +2318,28 @@ void test() {
 
 void setup() {
    chargeMode(false);  // enable charge mode
+   powerSupplyDisplay(false);
    pinMode(BAT_VOLT_EN_PIN, OUTPUT);
+#ifdef EPD_TYPE_13INCH
+   digitalWrite(BAT_VOLT_EN_PIN, HIGH);
+#else
    digitalWrite(BAT_VOLT_EN_PIN, LOW);
+#endif
+   pinMode(BAT_VOLT_SENSE_PIN, INPUT);
    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
    pinMode(LED_PIN, OUTPUT);
    digitalWrite(LED_PIN, LOW);
    Serial.begin(115200);
    analogReadResolution(12);
    systemData.usbConnected = usbCheckConnect();
-   delay(90);
+   delay(100);
+
    systemData.vddValue = readVDD(false);
-   if (!systemData.usbConnected && systemData.vddValue < 4100) {
-      if (DEBUG_FLAG) Serial.printf("[MAIN] Bat low protection: %dmV (counter: %d)\n", systemData.vddValue, StartCounter);
+   if (!systemData.usbConnected && systemData.vddValue < BAT_OFF_VALUE) {
+      if (DEBUG_FLAG) Serial.printf("[MAIN] Bat low protection: %dmV\n", systemData.vddValue);
+      analogWrite(LED_PIN, LED_DIM_VALUE);
       startupCounter(true);
       systemData.vddValue = 0;
-      digitalWrite(LED_PIN, HIGH);
       gotToDeepSleep(86000, false, false);
    }
    systemData.wakeupCause = getWakeupReason();
@@ -3094,26 +2356,27 @@ void setup() {
    }
 
    EepromInit(EEPROM_SIZE);
-   pinMode(12, INPUT);  // USB TEST PINS
-   pinMode(13, INPUT);  // USB TEST PINS
    pinMode(INT_PIN, INPUT);
-   pinMode(RST_PIN, OUTPUT);
-   pinMode(CS_EPD_PIN, OUTPUT);
-   pinMode(DC_PIN, OUTPUT);
+   pinMode(CS_SD_PIN, OUTPUT);
+   pinMode(SCK_PIN, OUTPUT);
+   pinMode(MOSI_PIN, OUTPUT);
+   digitalWrite(CS_SD_PIN, HIGH);
+
+   gpio_set_drive_capability((gpio_num_t)SCK_PIN, GPIO_DRIVE_CAP_1);
+   gpio_set_drive_capability((gpio_num_t)MOSI_PIN, GPIO_DRIVE_CAP_1);
 
 #if DEBUG
-   displayInfos.version = true;
-   displayInfos.batteryInfo = true;
-   displayInfos.wifiSignal = true;
-   displayInfos.deviceInfoString = true;
+   displaySetOverlayOption(VERSION, true);
+   displaySetOverlayOption(BATTERY_INFO, true);
+   displaySetOverlayOption(WIFI_SIGNAL, true);
    myEsp32FOTA.setManifestURL(OTA_URL_DEV);
 #else
-   displayInfos.deviceInfoString = true;
    myEsp32FOTA.setManifestURL(OTA_URL);
 #endif
+   displaySetOverlayOption(DEVICE_INFO_STRING, true);
    char firmwareVersion[] = SOFTWARE_VERSION;
 
-   ledBlink(500, true);
+   ledBlink(500, true, LED_DIM_VALUE);
    Serial.begin(115200);
    sleep(1);
 
@@ -3123,39 +2386,38 @@ void setup() {
       Serial.println("[MEM] SPIFFS initialisation failed!");
    }
    debugFS();
-   if (!systemData.usbConnected && systemData.vddValue < BAT_LOW_VALUE) displayInfos.batteryLowBig = true;  // enable bat low display if needed
+   if (!systemData.usbConnected && systemData.vddValue < BAT_LOW_VALUE) displaySetOverlayOption(BATTERY_LOW_BIG, true);  // enable bat low display if needed
    WiFi.onEvent(WiFiEvent);
-   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN);  // SCK(), MISO(),MOSI(), SS()
-   SPI.setFrequency(20000000);
-   SerialFlash.begin(CS_FLASH_PIN);  // proceed even if begin() fails
-   u8g2_for_adafruit_gfx.begin(display);
+   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN);              // SCK(), MISO(),MOSI(), SS()
+   SerialFlash.begin(CS_FLASH_PIN, DISPLAY_SPI_SPEED);  // proceed even if begin() fails
+   initEpaperDisplay(SPI);
    chargeMode(false);
 
    setDeviceUid();
+   setDisplayData(CLIENT_ID, systemData.vddValue);
    // TODO: maybe do a function to generally check updated mem values
 
    systemData.deviceOrientation = accInit();
-   // default is rotationText = 3 and rotationPicture = 2
    if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
-      displaySettings.rotationText = 1;
-      displaySettings.rotationPicture = 0;
+      displaySetRotation(1);
+   } else {
+      displaySetRotation(0);
    }
    float temperature = temperatureRead();
    if (DEBUG_FLAG) Serial.printf("[MAIN] Temp Main: %.2f °C\n", temperature);
    if (temperature < 21.0) {
       Serial.printf("[MAIN] Low Temp detected: %.2f °C - disable quick refresh\n", temperature);
-      displaySettings.quickRefresh = false;
+      displaySetQuickRefresh(false);
    }
 
 #if DEBUG
-   checkDeviceBatch();  // set settings for specific versions (1=old revision)
-   // test();              //-----------------test---------please remove
+   // test();  //-----------------test---------please remove
 #endif
    tickerFailsave.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
    testModeCheck();                   // check if needs to enter deploy state
    bool wifiConnected = wifiSmart();  // Replaces wifi begin
 
-   ledBlink(500, true);
+   ledBlink(500, true, LED_DIM_VALUE);
    tickerFailsave.detach();
    tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
 
@@ -3163,11 +2425,11 @@ void setup() {
    if (StartCounter > 2) {
       bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
       if (updatedNeeded) {
-         displaySettings.quickRefresh = true;
+         displaySetQuickRefresh(true);
          waitDisplayComplete(false);
          delay(200);
          displaySetText("DEV OTA Update...", true, true);
-         ledBlink(2000, true);
+         ledBlink(2000, true, LED_DIM_VALUE);
          Serial.println("[OTA] Dev OTA Started.....");
          writeIntToFlash(0, 170);
          resetAll(false, false);
@@ -3180,11 +2442,11 @@ void setup() {
 #else
    bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
    if (updatedNeeded) {
-      displaySettings.quickRefresh = true;
+      displaySetQuickRefresh(true);
       waitDisplayComplete(false);
       delay(200);
       displayOtaScreen();
-      ledBlink(2000, true);
+      ledBlink(2000, true, LED_DIM_VALUE);
       Serial.println("[OTA] OTA Started.....");
       writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
       resetAll(false, false);
@@ -3254,6 +2516,7 @@ void setup() {
    // TODO: Force Update after wifi screen if just one connection loss and then back
    // Set EEPROM on wifi screen and read here. If true and picture version is not 0 then update
    bool isUpdate = getVersionUpdate();
+   // if (DEBUG_FLAG) isUpdate = true;  // TODO: remove in production, only for testing
    if (!isUpdate) {
       if (newVersionSave <= 0) {
          if (DEBUG_FLAG) setUpdateState("update_checked_nopicture");
@@ -3271,8 +2534,8 @@ void setup() {
          gotToDeepSleep(DEFAULT_SLEEP);
       }
    }
+   powerSupplyDisplay(true);
    checkOrientationInBackground(systemData.deviceOrientation, true);
-   // updateDisplayAsync("updatepicture");  // TODO: maybe remove
 
    if (SPIFFS.usedBytes() > 10000) {
       Serial.println("[MEM] SPIFFS seems to full ...");
@@ -3293,11 +2556,12 @@ void loop() {
          int dlSuccess = loadImageFromWeb(DL_URL, fileName);
          if (DEBUG_FLAG) setUpdateState("download_ok");  // also connects aws
          Serial.println("[DL] Done");
-         debugFS();
          WiFi.setSleep(true);
+         esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
          waitDisplayComplete(false);
-         delay(25);
          int setSuccess = setImageFromFS(fileName);
+         Serial.println("[EPD] Set Image Done");
+         delay(500);
          debugFS();
          if (isOrientUpdate) return;  // if orientation change during update stop process to avoid wrong update state
          if (dlSuccess == 0 && setSuccess == 0) {
@@ -3311,10 +2575,10 @@ void loop() {
       delay(500);
    }
    if (WiFi.status() == WL_CONNECTED) {
-      ledBlink(500, true);
+      ledBlink(500, true, LED_DIM_VALUE);
 
    } else {
-      ledBlink(200, true);
+      ledBlink(200, true, LED_DIM_VALUE);
       if (DEBUG_FLAG)
          Serial.println("[NETWORK] WiFi connection lost ... reconnecting... ");
 
