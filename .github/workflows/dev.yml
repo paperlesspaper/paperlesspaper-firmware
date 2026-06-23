@@ -1,6 +1,9 @@
 name: "Dev Build"
 run-name: "b3.0.${{ github.run_number }}"
 
+env:
+  FW_VERSION: "3.0.${{ github.run_number }}"
+
 on:
   push:
     branches:
@@ -38,8 +41,7 @@ jobs:
 
       - name: Set version and debug flag
         run: |
-          newversion="${{ github.run_name }}"
-          echo "Version: $newversion"
+          newversion="${{ env.FW_VERSION }}"
           
           # Replace version in types.h
           sed -i -e "s/0\.0\.0/$newversion/g" src/types.h
@@ -73,7 +75,7 @@ jobs:
       - name: Publish Pipeline Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: epaper_fw_epd13_dev_${{ github.run_name }}
+          name: epaper_fw_epd13_dev_b${{ env.FW_VERSION }}
           path: artifact/
 
       - name: Configure AWS credentials
@@ -92,11 +94,11 @@ jobs:
         run: |
           # Create a ZIP archive of the artifacts
           cd artifact
-          zip -r ../epaper_fw_epd13_dev_${{ github.run_name }}.zip ./*
+          zip -r ../epaper_fw_epd13_dev_${{ env.FW_VERSION }}.zip ./*
           cd ..
 
       - name: S3 Upload Archive
         run: |
           # Upload the ZIP archive to the root of the bucket
-          aws s3 cp epaper_fw_epd13_dev_${{ github.run_name }}.zip s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
+          aws s3 cp epaper_fw_epd13_dev_${{ env.FW_VERSION }}.zip s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
 
