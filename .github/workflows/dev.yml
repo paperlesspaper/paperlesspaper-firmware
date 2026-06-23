@@ -2,7 +2,7 @@ name: "Dev Build"
 run-name: "b3.0.${{ github.run_number }}"
 
 env:
-  FW_VERSION: "3.0.${{ github.run_number }}"
+  FW_VERSION: "b3.0.${{ github.run_number }}"
 
 on:
   push:
@@ -21,6 +21,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+          cache: 'pip'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
 
       - name: Install PlatformIO
         run: |
