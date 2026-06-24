@@ -29,7 +29,7 @@ jobs:
           path: |
             ~/.platformio
             .pio
-          key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini') }}
+          key: ${{ runner.os }}-pio-${{ hashFiles('deploy/platformio.ini') }}
           restore-keys: |
             ${{ runner.os }}-pio-
 
