@@ -2248,8 +2248,6 @@ void test() {
    // gotToDeepSleep(86000, false, false);
    if (powerSupplyDisplay(true)) delay(100);
 
-   sdTest();
-   while (true) {};
    bool quickref = true;
    int zufallszahl = random(2, 16);
    analogWrite(LED_PIN, 100);
@@ -2259,6 +2257,11 @@ void test() {
       displayWipe(true);
       displaySetBlankTest(zufallszahl, true);
       while (true) {};*/
+
+   // displayWipe(true);
+   // displaySetBlankTest(zufallszahl, true);
+   // while (true) {};
+
    displayOtaScreen();
    delay(2000);
    displaySetText("test", false, quickref);
@@ -2273,8 +2276,8 @@ void test() {
    delay(2000);
    displaySetText("test black", true, quickref);
    delay(2000);
-   displaySetBlankTest(zufallszahl, false);
-   displayWipe(quickref);
+   displaySetBlankTest(zufallszahl, true);
+   displayWipe(false);
    // displaySetBlankTest(2, true);
    // setImageFromFS("tmp.gz");
    //   copyFileFromFlashToSD("tmp.gz", "testfile.gz");
@@ -2395,7 +2398,9 @@ void setup() {
    WiFi.onEvent(WiFiEvent);
    SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN);              // SCK(), MISO(),MOSI(), SS()
    SerialFlash.begin(CS_FLASH_PIN, DISPLAY_SPI_SPEED);  // proceed even if begin() fails
+   powerSupplyDisplay(true);
    initEpaperDisplay(SPI);
+   powerSupplyDisplay(false);
    chargeMode(false);
 
    setDeviceUid();

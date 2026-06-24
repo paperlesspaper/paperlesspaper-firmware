@@ -2,14 +2,6 @@
 #include "types.h"
 #include <Arduino.h>
 
-#ifdef EPD_TYPE_13INCH
-// #define COLOR_WHITE_FAST GxEPD_GREEN
-#define COLOR_WHITE_FAST GxEPD_YELLOW
-#define COLOR_BLACK_FAST GxEPD_BLUE
-#else
-#define COLOR_WHITE_FAST GxEPD_WHITE_I
-#define COLOR_BLACK_FAST GxEPD_BLACK_I
-#endif
 #define COLOR_WHITE GxEPD_WHITE
 #define COLOR_BLACK GxEPD_BLACK
 
@@ -44,17 +36,12 @@
 #ifdef EPD_TYPE_13INCH
 #define EPD_WIDTH 1600
 #define EPD_HEIGHT 1200
-#define EPD_QUICKREFRESH_TIMEOUT 2500
-// #define EPD_QUICKREFRESH_TIMEOUT 10
-#define EPD_QUICKREFRESH_WIPE_TIMEOUT 2000
 #define EPD_QR_SIZE_SMALL 3
 #define EPD_QR_SIZE_BIG 12
 using DisplayType = GxEPD2_7C<GxEPD2_1330c_EL133UF3, GxEPD2_1330c_EL133UF3::HEIGHT / 8>;
 #else
 #define EPD_WIDTH 800
 #define EPD_HEIGHT 480
-#define EPD_QUICKREFRESH_TIMEOUT 960
-#define EPD_QUICKREFRESH_WIPE_TIMEOUT 960
 #define EPD_QR_SIZE_SMALL 2
 #define EPD_QR_SIZE_BIG 8
 using DisplayType = GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT / 4>;
@@ -62,6 +49,8 @@ using DisplayType = GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HE
 
 void printQRBlock(uint16_t x, uint16_t y, uint8_t size, uint16_t col);
 
+void displayTest();
+void displayTypeDetect();
 int accInit(bool skipInit = false);
 void setDisplayData(const char* clientId, int vddValue);
 void initEpaperDisplay(SPIClass& spiBus);
@@ -82,8 +71,8 @@ void displayOtaScreen();
 void displayNoPicture();
 void displayTurnOn();
 void displayWifiActivate(bool wifiProvisioningDone);
-void displayWipe(bool quick);
-void displaySetBlankTest(int offsetVar, bool doQuickRefresh);
+void displayWipe(bool quick, bool useAltInit = false);
+void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit = false);
 bool isEpaperActive();
 void displaySetRotation(int orientation);
 void displaySetQuickRefresh(bool enable);

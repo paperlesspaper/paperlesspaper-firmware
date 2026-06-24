@@ -1,4 +1,5 @@
 #include "epaper_display.h"
+#include "GxEPD2.h"
 #include "SdFat.h"
 #include "types.h"
 #include <Arduino.h>
@@ -26,7 +27,19 @@ DisplaySettings displaySettings = {
     .rotationText = 3,
     .rotationPicture = 2,
     .quickRefresh = true,
-    .displayQuickRefreshTime = EPD_QUICKREFRESH_TIMEOUT};
+    .globalQuickRefreshDisable = false,
+#ifdef EPD_TYPE_13INCH
+    .displayQuickRefreshTime = 2500,
+    .displayQuickRefreshWipeTime = 2000,
+    .colorWhiteFast = GxEPD_BLACK,
+    .colorBlackFast = GxEPD_BLUE
+#else
+    .displayQuickRefreshTime = 960,
+    .displayQuickRefreshWipeTime = 960,
+    .colorWhiteFast = GxEPD_WHITE_I,
+    .colorBlackFast = GxEPD_BLACK_I
+#endif
+};
 
 // Hardware externs
 static char epd_client_id[20] = {0};
@@ -43,6 +56,57 @@ DisplayType display(GxEPD2_1330c_EL133UF3(/*CS=*/CS_EPD_PIN, /*CS-S=*/EPD_CS_S, 
 DisplayType display(GxEPD2_730c_GDEP073E01(/*CS=*/CS_EPD_PIN, /*DC=*/DC_PIN, /*RST=*/RST_PIN, /*BUSY=*/BUSY_PIN));
 #endif
 U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;
+
+void displayTest() {
+
+   uint8_t buffer[100];
+
+   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
+   display.init(115200);
+
+   epd_spi_bus->endTransaction();
+   Serial.printf("[EPD] ----Register Read START----\n");
+   for (uint16_t reg = 0x00; reg <= 0xF9; reg++) {
+      epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
+      digitalWrite(DC_PIN, LOW);
+      digitalWrite(CS_EPD_PIN, LOW);
+      epd_spi_bus->transfer((uint8_t)reg);
+      digitalWrite(DC_PIN, HIGH);
+
+      for (int i = 0; i < 100; i++) {
+         buffer[i] = epd_spi_bus->transfer(0x00);
+      }
+
+      digitalWrite(CS_EPD_PIN, HIGH);
+      epd_spi_bus->endTransaction();
+
+      int printLength = 100;
+      int consecutiveZeros = 0;
+      for (int i = 0; i < 100; i++) {
+         if (buffer[i] == 0x00) {
+            consecutiveZeros++;
+            if (consecutiveZeros == 5) {
+               printLength = i - 4;
+               break;
+            }
+         } else {
+            consecutiveZeros = 0;
+         }
+      }
+
+      if (printLength > 0) {
+         Serial.printf("[EPD] Register 0x%02X Read (%d bytes): ", reg, printLength);
+         for (int i = 0; i < printLength; i++) {
+            if (i % 16 == 0 && i != 0) Serial.print("\n  ");
+            Serial.printf("0x%02X ", buffer[i]);
+         }
+         Serial.println();
+      }
+
+      delay(10);  // Small delay to avoid flooding too fast
+   }
+   Serial.printf("[EPD] ----Register Read END----\n");
+}
 
 void setDisplayData(const char* clientId, int vddValue) {
    if (clientId) {
@@ -66,6 +130,7 @@ void initEpaperDisplay(SPIClass& spiBus) {
    display.epd2.selectSPI(spiBus, SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
    u8g2_for_adafruit_gfx.begin(display);
    displayIsInit = true;
+   displayTypeDetect();
 }
 
 void deinitDisplay() {
@@ -80,6 +145,50 @@ void deinitDisplay() {
    pinMode(CS_EPD_PIN, INPUT);
    pinMode(EPD_CS_S, INPUT);
    pinMode(DC_PIN, INPUT);
+}
+
+void displayTypeDetect() {
+   uint8_t reg9A[2] = {0};
+   uint8_t patternDKE[2] = {0x36, 0x42};
+   uint8_t patternOKRA1[2] = {0x31, 0xC2};
+   uint8_t patternOKRA2[2] = {0x33, 0x00};  // Das zweite Byte wird bei OKRA 2 manchmal nicht gesendet, wir prüfen primär das erste
+
+   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
+   display.init(115200);
+
+   epd_spi_bus->endTransaction();
+
+   // Register 0x9A auslesen
+   epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
+   digitalWrite(DC_PIN, LOW);
+   digitalWrite(CS_EPD_PIN, LOW);
+   epd_spi_bus->transfer(0x9A);
+   digitalWrite(DC_PIN, HIGH);
+
+   for (int i = 0; i < 2; i++) {
+      reg9A[i] = epd_spi_bus->transfer(0x00);
+   }
+   digitalWrite(CS_EPD_PIN, HIGH);
+   epd_spi_bus->endTransaction();
+
+   // Pattern Matching
+   if (memcmp(reg9A, patternDKE, 2) == 0) {
+      Serial.println("[EPD] Match Found: DKE Display");
+      displaySettings.displayQuickRefreshTime = 1500;
+      displaySettings.displayQuickRefreshWipeTime = 500;
+      displaySettings.colorWhiteFast = GxEPD_RED;
+      displaySettings.colorBlackFast = GxEPD_BLUE;
+   } else if (memcmp(reg9A, patternOKRA1, 2) == 0 || memcmp(reg9A, patternOKRA2, 2) == 0) {
+      Serial.println("[EPD] Match Found: OKRA Display");
+      displaySettings.displayQuickRefreshTime = 1500;  // 1400-1700
+      displaySettings.displayQuickRefreshWipeTime = 3500;
+      displaySettings.colorWhiteFast = GxEPD_YELLOW;
+      displaySettings.colorBlackFast = GxEPD_BLUE;
+   } else {
+      Serial.println("[EPD] No matching pattern found. Unknown Display Type.");
+      Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
+      displaySettings.globalQuickRefreshDisable = true;
+   }
 }
 
 void displaySetOverlayOption(DisplayInfoKey key, bool value) {
@@ -327,18 +436,6 @@ int setImageFromFS_13inch(String fileName) {
          epd_spi_bus->endTransaction();
          epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
 
-         /*
-         //TODO: Not sure if this block is needed
-         digitalWrite(csPin, LOW);
-         epd_spi_bus->transfer(0xF0);
-         epd_spi_bus->transfer(0x49);
-         epd_spi_bus->transfer(0x55);
-         epd_spi_bus->transfer(0x13);
-         epd_spi_bus->transfer(0x5D);
-         epd_spi_bus->transfer(0x05);
-         epd_spi_bus->transfer(0x10);
-         digitalWrite(csPin, HIGH);
-*/
          // PTLW (Partial Window) Command Setting 0x83
          digitalWrite(csPin, LOW);
          epd_spi_bus->transfer(0x83);
@@ -412,8 +509,8 @@ int setImageFromFS(String fileName) {
 
 void displayOverlays(DisplayType& dispObj, DisplayInfo displayData, bool invertColors, bool fullcolor) {
    int16_t tw = 0;
-   int foreGround = COLOR_BLACK_FAST;
-   int backGround = COLOR_WHITE_FAST;
+   int foreGround = displaySettings.colorBlackFast;
+   int backGround = displaySettings.colorWhiteFast;
    if (fullcolor) {
       foreGround = COLOR_BLACK;
       backGround = COLOR_WHITE;
@@ -543,8 +640,8 @@ void displayDebugInfo() {
       displayWipe(true);
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
       display.init(115200);
-      foreGround = COLOR_WHITE_FAST;
-      backGround = COLOR_BLACK_FAST;
+      foreGround = displaySettings.colorWhiteFast;
+      backGround = displaySettings.colorBlackFast;
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
       display.init(115200);
@@ -629,8 +726,8 @@ void displayOtaScreen() {
       displayWipe(true);
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
       display.init(115200);
-      foreGround = COLOR_WHITE_FAST;
-      backGround = COLOR_BLACK_FAST;
+      foreGround = displaySettings.colorWhiteFast;
+      backGround = displaySettings.colorBlackFast;
       fullColor = false;
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
@@ -707,8 +804,8 @@ void displayNoPicture() {
       displayWipe(true);
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
       display.init(115200);
-      foreGround = COLOR_BLACK_FAST;
-      backGround = COLOR_WHITE_FAST;
+      foreGround = displaySettings.colorBlackFast;
+      backGround = displaySettings.colorWhiteFast;
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
       display.init(115200);
@@ -788,8 +885,8 @@ void displayTurnOn() {
       displayWipe(true);
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
       display.init(115200);
-      foreGround = COLOR_WHITE_FAST;
-      backGround = COLOR_BLACK_FAST;
+      foreGround = displaySettings.colorWhiteFast;
+      backGround = displaySettings.colorBlackFast;
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
       display.init(115200);
@@ -892,8 +989,8 @@ void displayWifiActivate(bool wifiProvisioningDone) {
       displayWipe(true);
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
       display.init(115200);
-      foreGround = COLOR_BLACK_FAST;
-      backGround = COLOR_WHITE_FAST;
+      foreGround = displaySettings.colorBlackFast;
+      backGround = displaySettings.colorWhiteFast;
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
       display.init(115200);
@@ -977,12 +1074,12 @@ void displaySetText(String info, bool isBlackboard, bool quickRefresh, int posit
       displayWipe(true);
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
       display.init(115200);
-      foreGround = COLOR_BLACK_FAST;
-      backGround = COLOR_WHITE_FAST;
+      foreGround = displaySettings.colorBlackFast;
+      backGround = displaySettings.colorWhiteFast;
       if (isBlackboard) {
          invert = true;
-         foreGround = COLOR_WHITE_FAST;
-         backGround = COLOR_BLACK_FAST;
+         foreGround = displaySettings.colorWhiteFast;
+         backGround = displaySettings.colorBlackFast;
       }
    } else {
       if (isBlackboard) {
@@ -1021,7 +1118,7 @@ void displaySetText(String info, bool isBlackboard, bool quickRefresh, int posit
 }
 
 #if DEBUG
-void displaySetBlankTest(int offsetVar, bool doQuickRefresh) {
+void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit) {
    int foreGround = COLOR_BLACK;
    int backGround = COLOR_WHITE;
    Serial.println("[EPD] Set Display to Test Pattern");
@@ -1029,12 +1126,18 @@ void displaySetBlankTest(int offsetVar, bool doQuickRefresh) {
 
    if (doQuickRefresh) {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-      display.init(115200);
-      foreGround = COLOR_BLACK_FAST;
-      backGround = COLOR_WHITE_FAST;
+      if (useAltInit)
+         display.initAlt(115200);
+      else
+         display.init(115200);
+      foreGround = displaySettings.colorBlackFast;
+      backGround = displaySettings.colorWhiteFast;
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-      display.init(115200);
+      if (useAltInit)
+         display.initAlt(115200);
+      else
+         display.init(115200);
    }
 
    // use u8g2 transparent mode (this is default)
@@ -1084,17 +1187,26 @@ void displaySetBlankTest(int offsetVar, bool doQuickRefresh) {
 }
 #endif
 
-void displayWipe(bool quick) {
+void displayWipe(bool quick, bool useAltInit) {
+   Serial.println("[EPD] Display Wipe");
+
    uint8_t wipeColor = 6;
    if (quick) {
-      display.enableQuickRefresh(EPD_QUICKREFRESH_WIPE_TIMEOUT, true);
-      display.init(115200);
+      Serial.println(displaySettings.displayQuickRefreshWipeTime);
+      display.enableQuickRefresh(displaySettings.displayQuickRefreshWipeTime, true);
+      if (useAltInit)
+         display.initAlt(115200);
+      else
+         display.init(115200);
       // wipeColor = 0x06;
-      wipeColor = 3;
+      wipeColor = 3;  // tested 3
 
    } else {
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-      display.init(115200);
+      display.enableQuickRefresh(displaySettings.displayQuickRefreshWipeTime, false);
+      if (useAltInit)
+         display.initAlt(115200);
+      else
+         display.init(115200);
    }
    int colorSet = getColor(wipeColor);
    display.clearScreen(colorSet);
@@ -1143,6 +1255,10 @@ void displaySetRotation(int orientation) {
 }
 
 void displaySetQuickRefresh(bool enable) {
+   if (displaySettings.globalQuickRefreshDisable) {
+      displaySettings.quickRefresh = false;
+      return;
+   }
    if (enable) {
       displaySettings.quickRefresh = true;
 

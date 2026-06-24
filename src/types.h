@@ -55,7 +55,11 @@ struct DisplaySettings {
    uint8_t rotationText;
    uint8_t rotationPicture;
    bool quickRefresh;
+   bool globalQuickRefreshDisable;
    int displayQuickRefreshTime;
+   int displayQuickRefreshWipeTime;
+   uint16_t colorWhiteFast;
+   uint16_t colorBlackFast;
 };
 
 struct Settings {
