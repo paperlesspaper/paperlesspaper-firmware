@@ -598,6 +598,7 @@ bool wifiSmart() {
    if (isWifi == false && isTestMode == false && doReset == false) {
       powerSupplyDisplay(true);
       updateDisplayAsync("wifiactivate");
+      wifiTimeout = 3000UL;
    }
    // try to connect to current wifi
    wifiSettings.wifiRetries = 0;

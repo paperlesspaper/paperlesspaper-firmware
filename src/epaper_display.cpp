@@ -427,11 +427,27 @@ int setImageFromFS_13inch(String fileName) {
          uint16_t VRST = yImageStart / 2;
          uint16_t VRED = (yImageStart + linesPerChunk) / 2 - 1;
 
+         bool rotate180 = (displaySettings.rotationPicture > 0);
+
          for (int i = 0; i < linesPerChunk; i++) {
-            int lineInImage = yImageStart + i;
-            int byteOffsetInImage = (lineInImage * 600) + (half * 300);
+            int lineOnDisplay = yImageStart + i;
+            int lineInImage = rotate180 ? (physHeight - 1 - lineOnDisplay) : lineOnDisplay;
+            int srcHalf = rotate180 ? (1 - half) : half;
+
+            int byteOffsetInImage = (lineInImage * 600) + (srcHalf * 300);
             saveFile.seek(offsetData + byteOffsetInImage);
-            saveFile.read(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine);
+
+            if (rotate180) {
+               uint8_t tempLine[300];
+               saveFile.read(tempLine, bytesPerHalfLine);
+               for (int b = 0; b < bytesPerHalfLine; b++) {
+                  uint8_t origByte = tempLine[bytesPerHalfLine - 1 - b];
+                  // swap nibbles: left pixel becomes right pixel, right pixel becomes left pixel
+                  chunkBuffer[i * bytesPerHalfLine + b] = ((origByte & 0x0F) << 4) | (origByte >> 4);
+               }
+            } else {
+               saveFile.read(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine);
+            }
          }
          epd_spi_bus->endTransaction();
          epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
@@ -1236,8 +1252,8 @@ void displaySetRotation(int orientation) {
          break;
       case 1:
 #ifdef EPD_TYPE_13INCH
-         displaySettings.rotationText = 3;
-         displaySettings.rotationPicture = 0;
+         displaySettings.rotationText = 2;
+         displaySettings.rotationPicture = 2;
 #else
          displaySettings.rotationText = 1;
          displaySettings.rotationPicture = 0;
