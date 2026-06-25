@@ -17,6 +17,10 @@ Firmware for an ESP32-C6 based E-Paper display device, featuring BLE provisionin
 *   **Extension**: PlatformIO
 *   **Framework**: Arduino (via PlatformIO)
 
+## License
+
+This project is released under the GNU General Public License v3.0 (GPL-3.0). See the [`LICENSE`](LICENSE) file for the full license text.
+
 ## Installation & Setup
 
 1.  **Clone the Repository**
