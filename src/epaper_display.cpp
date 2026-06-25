@@ -149,7 +149,8 @@ void deinitDisplay() {
 
 void displayTypeDetect() {
    uint8_t reg9A[2] = {0};
-   uint8_t patternDKE[2] = {0x36, 0x42};
+   uint8_t patternDKE1[2] = {0x36, 0x42};
+   uint8_t patternDKE2[2] = {0x36, 0x36};
    uint8_t patternOKRA1[2] = {0x31, 0xC2};
    uint8_t patternOKRA2[2] = {0x33, 0x00};  // Das zweite Byte wird bei OKRA 2 manchmal nicht gesendet, wir prüfen primär das erste
 
@@ -172,7 +173,7 @@ void displayTypeDetect() {
    epd_spi_bus->endTransaction();
 
    // Pattern Matching
-   if (memcmp(reg9A, patternDKE, 2) == 0) {
+   if (memcmp(reg9A, patternDKE1, 2) == 0 || memcmp(reg9A, patternDKE2, 2) == 0) {
       Serial.println("[EPD] Match Found: DKE Display");
       displaySettings.displayQuickRefreshTime = 1500;
       displaySettings.displayQuickRefreshWipeTime = 500;
