@@ -2431,11 +2431,11 @@ void setup() {
 
 #if DEBUG
    myEsp32FOTA.printConfig();
-   updatedNeeded = myEsp32FOTA.execHTTPcheck();
+   bool updateNeeded = myEsp32FOTA.execHTTPcheck();
    Serial.printf("[OTA] V: %s OTA Needed: %d Set URL: %s \n", SOFTWARE_VERSION, updatedNeeded, OTA_URL_DEV);
    if (StartCounter > 2) {
-      updatedNeeded = true;
-      if (updatedNeeded) {
+      updateNeeded = true;
+      if (updateNeeded) {
          powerSupplyDisplay(true);
          displaySetQuickRefresh(true);
          waitDisplayComplete(false);
@@ -2452,8 +2452,8 @@ void setup() {
       }
    }
 #else
-   bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
-   if (updatedNeeded) {
+   bool updateNeeded = myEsp32FOTA.execHTTPcheck();
+   if (updateNeeded) {
       powerSupplyDisplay(true);
       displaySetQuickRefresh(true);
       waitDisplayComplete(false);
