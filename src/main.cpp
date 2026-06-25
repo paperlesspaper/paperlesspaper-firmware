@@ -307,8 +307,9 @@ void iotReceiveHandler(String& topic, String& payload) {
          myEsp32FOTA.execOTA();
          delay(2000);
       }
+   }
 
-      if (doc["t"].is<long>()) {
+   if (doc["t"].is<long>()) {
          newVersionSave = doc["t"].as<long>();
          isNewVersion = true;
       }
@@ -357,10 +358,10 @@ void iotReceiveHandler(String& topic, String& payload) {
             deviceActivationNotStarted = true;
          }
          if (strcmp(activated, "reset") == 0) {
+            Serial.println("[AWS RX] Device activation reset");
             deviceActivationReset = true;
          }
       }
-   }
 }
 void ledBlinkFunctionOff() {
    analogWrite(LED_PIN, 0);
@@ -1832,6 +1833,7 @@ void debugCheck() {
    printDebugInfo();
    waitDisplayComplete(false);
    displaySetQuickRefresh(true);
+   powerSupplyDisplay(true);
    displayDebugInfo();
    delay(2000);
    gotToDeepSleep(DEFAULT_SLEEP, false, false);  // dont show the deep sleep screen stay with debug info
@@ -2257,7 +2259,9 @@ void test() {
 
    // displayWipe(true);
    // displaySetBlankTest(zufallszahl, true);
-   // while (true) {};
+
+   debugCheck();
+   while (true) {};
 
    displayOtaScreen();
    delay(2000);
