@@ -1204,11 +1204,10 @@ void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit) {
 #endif
 
 void displayWipe(bool quick, bool useAltInit) {
-   Serial.println("[EPD] Display Wipe");
+   Serial.printf("[EPD] Display Wipe (%ds)\n", displaySettings.displayQuickRefreshWipeTime);
 
    uint8_t wipeColor = 6;
    if (quick) {
-      Serial.println(displaySettings.displayQuickRefreshWipeTime);
       display.enableQuickRefresh(displaySettings.displayQuickRefreshWipeTime, true);
       if (useAltInit)
          display.initAlt(115200);
