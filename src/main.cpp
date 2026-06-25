@@ -2432,7 +2432,7 @@ void setup() {
 #if DEBUG
    myEsp32FOTA.printConfig();
    bool updateNeeded = myEsp32FOTA.execHTTPcheck();
-   Serial.printf("[OTA] V: %s OTA Needed: %d Set URL: %s \n", SOFTWARE_VERSION, updatedNeeded, OTA_URL_DEV);
+   Serial.printf("[OTA] V: %s OTA Needed: %d Set URL: %s \n", SOFTWARE_VERSION, updateNeeded, OTA_URL_DEV);
    if (StartCounter > 2) {
       updateNeeded = true;
       if (updateNeeded) {
