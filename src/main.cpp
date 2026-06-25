@@ -1804,6 +1804,7 @@ bool resetAll(bool resetActivation, bool resetWifi) {
    }
 
    if (resetActivation) {
+      powerSupplyDisplay(true);
       startupCounter(true);
       writeIntToFlash(0, 170);  // reset activation counter
       bool success = deactivateDevice();
@@ -2430,7 +2431,6 @@ void setup() {
    tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
 
 #if DEBUG
-   myEsp32FOTA.printConfig();
    bool updateNeeded = myEsp32FOTA.execHTTPcheck();
    Serial.printf("[OTA] V: %s OTA Needed: %d Set URL: %s \n", SOFTWARE_VERSION, updateNeeded, OTA_URL_DEV);
    if (StartCounter > 2) {
@@ -2576,6 +2576,8 @@ void loop() {
          Serial.println("[EPD] Set Image Done");
          delay(500);
          debugFS();
+         if (DEBUG_FLAG) Serial.printf("[MAIN] all picture updates done: %d %d\n", dlSuccess, setSuccess);
+
          if (isOrientUpdate) return;  // if orientation change during update stop process to avoid wrong update state
          if (dlSuccess == 0 && setSuccess == 0) {
             writeIntToFlash(newVersionSave, 150);
