@@ -59,7 +59,7 @@ jobs:
           sed -i -e "s/0\.0\.0/$newversion/g" src/types.h
           
           # Replace DEBUG flag in types.h
-          sed -i -e "s/#define DEBUG 0/#define DEBUG 1/g" src/types.h
+          sed -i -E "s/#define DEBUG [01]/#define DEBUG 1/g" src/types.h
           
           # Replace FOTA JSON content
           sed -i -e "s/X.X.X/$newversion/g" deploy/espfota.json
