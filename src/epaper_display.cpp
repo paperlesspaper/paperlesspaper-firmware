@@ -186,7 +186,7 @@ void displayTypeDetect() {
       displaySettings.colorWhiteFast = GxEPD_YELLOW;
       displaySettings.colorBlackFast = GxEPD_BLUE;
    } else {
-      Serial.println("[EPD] No matching pattern found. Unknown Display Type.");
+      Serial.println("[EPD] No matching Type.");
       Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
       displaySettings.globalQuickRefreshDisable = true;
    }
