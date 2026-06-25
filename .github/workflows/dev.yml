@@ -3,6 +3,7 @@ run-name: "b3.0.${{ github.run_number }}"
 
 env:
   FW_VERSION: "b3.0.${{ github.run_number }}"
+  FW_VERSION_DEVICE: "3.0.${{ github.run_number }}-beta"
 
 on:
   push:
@@ -52,7 +53,7 @@ jobs:
 
       - name: Set version and debug flag
         run: |
-          newversion="${{ env.FW_VERSION }}"
+          newversion="${{ env.FW_VERSION_DEVICE }}"
           
           # Replace version in types.h
           sed -i -e "s/0\.0\.0/$newversion/g" src/types.h

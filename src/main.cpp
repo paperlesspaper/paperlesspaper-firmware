@@ -296,78 +296,72 @@ void iotReceiveHandler(String& topic, String& payload) {
       Serial.printf("[AWS RX] OTA URL received: '%s' (%d) \n", otaUrlTemp, otaUrlLength);
       if (otaUrlLength > 5) {
          myEsp32FOTA.setManifestURL(otaUrlTemp);
-         bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
-         if (updatedNeeded) {
-            displaySetQuickRefresh(true);
-            waitDisplayComplete(false);
-            delay(200);
-            displaySetText("Updating Software...", true, true);
-            ledBlink(2000, true);
-            Serial.println("[OTA] OTA via MQTT Started.....");
-            writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
-            resetAll(false, false);
-            myEsp32FOTA.execOTA();
-            delay(2000);
-         } else {
-            Serial.println("[OTA] OTA URL is same Version - No OTA needed");
-         }
+         displaySetQuickRefresh(true);
+         waitDisplayComplete(false);
+         delay(200);
+         displaySetText("Updating Software...", true, true);
+         ledBlink(2000, true);
+         Serial.println("[OTA] OTA via MQTT Started.....");
+         writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
+         resetAll(false, false);
+         myEsp32FOTA.execOTA();
+         delay(2000);
       }
-   }
 
-   if (doc["t"].is<long>()) {
-      newVersionSave = doc["t"].as<long>();
-      isNewVersion = true;
-   }
+      if (doc["t"].is<long>()) {
+         newVersionSave = doc["t"].as<long>();
+         isNewVersion = true;
+      }
 
-   if (doc["act"].is<JsonString>()) {
-      const char* activated;
-      activated = doc["act"];
-      if (strcmp(activated, "activated") == 0) {
-         Serial.println("[AWS RX] Device is activated");
-         if (doc["key"].is<JsonString>()) {
-            const char* devicekey = doc["key"];
-            sprintf(CLIENT_KEY, "%s", devicekey);
-            // TODO: Maybe use this for activation
-         }
-         if (doc["lut"].is<JsonString>()) {
-            const char* lut = doc["lut"];
-            settings.lut = lut;
-         }
-         if (doc["timeout"].is<int>()) {
-            settings.timeout = doc["timeout"].as<int>();
-            if (settings.timeout < 60) {
-               settings.timeout = 60;  // minimum timeout 60 seconds TODO: add trigger to keep device always on
+      if (doc["act"].is<JsonString>()) {
+         const char* activated;
+         activated = doc["act"];
+         if (strcmp(activated, "activated") == 0) {
+            Serial.println("[AWS RX] Device is activated");
+            if (doc["key"].is<JsonString>()) {
+               const char* devicekey = doc["key"];
+               sprintf(CLIENT_KEY, "%s", devicekey);
+               // TODO: Maybe use this for activation
             }
-         }
-         if (doc["clearscreen"].is<bool>()) {
-            settings.clearscreen = doc["clearscreen"].as<bool>();
-         }
-         if (doc["sleepdisabled"].is<bool>()) {
-            settings.sleepDisabled = doc["sleepdisabled"].as<bool>();
-         }
-         if (doc["overlay"].is<bool>()) {
-            bool showOverlay = doc["overlay"].as<bool>();
-            if (showOverlay) {
-               settings.showWifiWarning = true;
-               settings.showBatteryWarning = true;
-            } else {
-               settings.showWifiWarning = false;
-               settings.showBatteryWarning = false;
+            if (doc["lut"].is<JsonString>()) {
+               const char* lut = doc["lut"];
+               settings.lut = lut;
             }
+            if (doc["timeout"].is<int>()) {
+               settings.timeout = doc["timeout"].as<int>();
+               if (settings.timeout < 60) {
+                  settings.timeout = 60;  // minimum timeout 60 seconds TODO: add trigger to keep device always on
+               }
+            }
+            if (doc["clearscreen"].is<bool>()) {
+               settings.clearscreen = doc["clearscreen"].as<bool>();
+            }
+            if (doc["sleepdisabled"].is<bool>()) {
+               settings.sleepDisabled = doc["sleepdisabled"].as<bool>();
+            }
+            if (doc["overlay"].is<bool>()) {
+               bool showOverlay = doc["overlay"].as<bool>();
+               if (showOverlay) {
+                  settings.showWifiWarning = true;
+                  settings.showBatteryWarning = true;
+               } else {
+                  settings.showWifiWarning = false;
+                  settings.showBatteryWarning = false;
+               }
+            }
+            Serial.printf("[AWS RX] SETTINGS - Sleep: %d (disable:%d) Lut: %s Overlay: %d-%d \n", settings.timeout, settings.sleepDisabled, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
+            deviceActivated = true;
          }
-         Serial.printf("[AWS RX] SETTINGS - Sleep: %d (disable:%d) Lut: %s Overlay: %d-%d \n", settings.timeout, settings.sleepDisabled, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
-         deviceActivated = true;
-      }
-      if (strcmp(activated, "not_started") == 0) {
-         Serial.println("[AWS RX] Device activation not started");
-         deviceActivationNotStarted = true;
-      }
-      if (strcmp(activated, "reset") == 0) {
-         deviceActivationReset = true;
+         if (strcmp(activated, "not_started") == 0) {
+            Serial.println("[AWS RX] Device activation not started");
+            deviceActivationNotStarted = true;
+         }
+         if (strcmp(activated, "reset") == 0) {
+            deviceActivationReset = true;
+         }
       }
    }
 }
-
 void ledBlinkFunctionOff() {
    analogWrite(LED_PIN, 0);
    perdiodicLedOff.detach();
@@ -1622,6 +1616,7 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
    initEpaperDisplay(SPI);
    checkOrientationInBackground(0, false);
+   startupCounter(true);
    if (!settings.sleepDisabled) WiFi.disconnect(true);
    if (motionWake) {
       accIntSet(80);  // Set acc int wakeup /TODO: disable if no motion wakeup
@@ -2357,7 +2352,9 @@ void setup() {
       startupCounter(false);
       if (StartCounter >= 5) {
       } else {
-         tickerStatupCounter.once_ms(3000, startupCounter, 1);
+         int startupCounterDelay = 3000;
+         if (DEBUG_FLAG) startupCounterDelay = 10000;
+         tickerStatupCounter.once_ms(startupCounterDelay, startupCounter, 1);
       }
 
    } else {
@@ -2433,9 +2430,12 @@ void setup() {
    tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
 
 #if DEBUG
+   bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
+   Serial.printf("[OTA] V: %s OTA Needed: %d Set URL: %s \n", SOFTWARE_VERSION, updatedNeeded, OTA_URL_DEV);
    if (StartCounter > 2) {
-      bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
+      updatedNeeded = true;
       if (updatedNeeded) {
+         powerSupplyDisplay(true);
          displaySetQuickRefresh(true);
          waitDisplayComplete(false);
          delay(200);
@@ -2453,6 +2453,7 @@ void setup() {
 #else
    bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
    if (updatedNeeded) {
+      powerSupplyDisplay(true);
       displaySetQuickRefresh(true);
       waitDisplayComplete(false);
       delay(200);
@@ -2576,8 +2577,8 @@ void loop() {
          debugFS();
          if (isOrientUpdate) return;  // if orientation change during update stop process to avoid wrong update state
          if (dlSuccess == 0 && setSuccess == 0) {
-            setUpdateState("update_ok");
             writeIntToFlash(newVersionSave, 150);
+            setUpdateState("update_ok");
          } else {
             setUpdateState("update_failed");
             displaySetText("Error: Picture download failed, please try again", false);
