@@ -2430,7 +2430,8 @@ void setup() {
    tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
 
 #if DEBUG
-   bool updatedNeeded = myEsp32FOTA.execHTTPcheck();
+   myEsp32FOTA.printConfig();
+   updatedNeeded = myEsp32FOTA.execHTTPcheck();
    Serial.printf("[OTA] V: %s OTA Needed: %d Set URL: %s \n", SOFTWARE_VERSION, updatedNeeded, OTA_URL_DEV);
    if (StartCounter > 2) {
       updatedNeeded = true;

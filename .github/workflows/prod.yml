@@ -1,14 +1,14 @@
-name: "Dev Build"
-run-name: "b3.0.${{ github.run_number }}"
+name: "Prod Build"
+run-name: "3.0.${{ github.run_number }}"
 
 env:
-  FW_VERSION: "b3.0.${{ github.run_number }}"
+  FW_VERSION: "3.0.${{ github.run_number }}"
   FW_VERSION_DEVICE: "3.0.${{ github.run_number }}"
 
 on:
   push:
     branches:
-      - paper-l
+      - main
 
 jobs:
   build:
@@ -64,7 +64,7 @@ jobs:
           # Replace FOTA JSON content
           sed -i -e "s/X.X.X/$newversion/g" deploy/espfota.json
           sed -i -e "s|http://sample.de/firmware.bin|http://${{ secrets.S3_BUCKET_NAME }}/firmware.bin|g" deploy/espfota.json
-          sed -i -e "s/firmware.bin/firmware_epd13_dev.bin/g" deploy/espfota.json
+          sed -i -e "s/firmware.bin/firmware_epd13.bin/g" deploy/espfota.json
           cp ./deploy/platformio.ini ./platformio.ini
 
       - name: Install PlatformIO Dependencies
@@ -83,13 +83,13 @@ jobs:
           
           ls -la
           mkdir artifact
-          cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_epd13_dev.bin
-          cp ./deploy/espfota.json ./artifact/espfota_epd13_dev.json
+          cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_epd13.bin
+          cp ./deploy/espfota.json ./artifact/espfota_epd13.json
 
       - name: Publish Pipeline Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: epaper_fw_epd13_dev_b${{ env.FW_VERSION }}
+          name: epaper_fw_epd13_${{ env.FW_VERSION }}
           path: artifact/
 
       - name: Configure AWS credentials
@@ -102,17 +102,17 @@ jobs:
       - name: S3 Upload Firmware and JSON
         run: |
           # Upload files to the root of the bucket with public-read ACL
-          aws s3 cp ./artifact/ s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive --exclude "*" --include "firmware_epd13_dev*" --include "espfota_epd13_dev*" --acl public-read
+          aws s3 cp ./artifact/ s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive --exclude "*" --include "firmware_epd13*" --include "espfota_epd13*" --acl public-read
 
       - name: Create Archive
         run: |
           # Create a ZIP archive of the artifacts
           cd artifact
-          zip -r ../epaper_fw_epd13_dev_${{ env.FW_VERSION }}.zip ./*
+          zip -r ../epaper_fw_epd13_${{ env.FW_VERSION }}.zip ./*
           cd ..
 
       - name: S3 Upload Archive
         run: |
           # Upload the ZIP archive to the root of the bucket
-          aws s3 cp epaper_fw_epd13_dev_${{ env.FW_VERSION }}.zip s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
+          aws s3 cp epaper_fw_epd13_${{ env.FW_VERSION }}.zip s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
 
