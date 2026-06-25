@@ -9,3 +9,7 @@ azure-pipelines - Kopie.yml
 /managed_components/
 secrets.h
 .env
+/esptools
+/lib
+main.cpp.7inch
+compile_commands.json
