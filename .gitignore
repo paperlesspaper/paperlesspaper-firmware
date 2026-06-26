@@ -13,3 +13,5 @@ secrets.h
 /lib
 main.cpp.7inch
 compile_commands.json
+cover.bmp
+url_cover.bmp

@@ -32,13 +32,14 @@ DisplaySettings displaySettings = {
     .displayQuickRefreshTime = 2500,
     .displayQuickRefreshWipeTime = 2000,
     .colorWhiteFast = GxEPD_BLACK,
-    .colorBlackFast = GxEPD_BLUE
+    .colorBlackFast = GxEPD_BLUE,
 #else
     .displayQuickRefreshTime = 960,
     .displayQuickRefreshWipeTime = 960,
     .colorWhiteFast = GxEPD_WHITE_I,
-    .colorBlackFast = GxEPD_BLACK_I
+    .colorBlackFast = GxEPD_BLACK_I,
 #endif
+    .colorWipeFast = 1  // blue
 };
 
 // Hardware externs
@@ -179,12 +180,15 @@ void displayTypeDetect() {
       displaySettings.displayQuickRefreshWipeTime = 500;
       displaySettings.colorWhiteFast = GxEPD_RED;
       displaySettings.colorBlackFast = GxEPD_BLUE;
+      displaySettings.colorWipeFast = 1;  // 3
+
    } else if (memcmp(reg9A, patternOKRA1, 2) == 0 || memcmp(reg9A, patternOKRA2, 2) == 0) {
       Serial.println("[EPD] Match Found: OKRA Display");
       displaySettings.displayQuickRefreshTime = 1500;  // 1400-1700
-      displaySettings.displayQuickRefreshWipeTime = 3500;
+      displaySettings.displayQuickRefreshWipeTime = 4000;
       displaySettings.colorWhiteFast = GxEPD_YELLOW;
-      displaySettings.colorBlackFast = GxEPD_BLUE;
+      displaySettings.colorBlackFast = GxEPD_WHITE;
+      displaySettings.colorWipeFast = 1;  // blue
    } else {
       Serial.println("[EPD] No matching Type.");
       Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
@@ -1134,11 +1138,63 @@ void displaySetText(String info, bool isBlackboard, bool quickRefresh, int posit
    } while (display.nextPage());
 }
 
+void displaySetDownloadSleep() {
+
+   int testOffset = 200;
+   uint8_t blockSize = EPD_QR_SIZE_SMALL;
+   char msg[128];
+   int foreGround = COLOR_BLACK;
+   int backGround = COLOR_WHITE;
+   uint16_t x0 = ((EPD_HEIGHT - 30 * blockSize) / 2);
+   uint16_t y0 = 1300;
+
+   uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
+   qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
+   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", epd_client_id, "&w=99");
+
+   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
+   display.init(115200);
+
+   display.epd2.setSuspendRefresh(true);
+   display.clearScreen(0x01);
+
+   Serial.println("[TEST] Loading image into RAM...");
+   setImageFromFS("cover.bmp");
+
+   Serial.printf("[EPD] QR Set X:%d Y:%d\n", x0, y0);
+   display.setRotation(0);
+   display.setPartialWindow(x0 - 3, y0 - 2, 100, 100);
+   display.firstPage();
+   do {
+      display.fillScreen(GxEPD_WHITE);
+
+      u8g2_for_adafruit_gfx.setFontDirection(0);
+      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);
+      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);
+      u8g2_for_adafruit_gfx.setFontMode(1);  // use u8g2 transparent mode (this is default)
+
+      for (uint8_t y = 0; y < QR.size; y++) {
+         // Eor each horizontal module
+         for (uint8_t x = 0; x < QR.size; x++) {
+            if (qrcode_getModule(&QR, x, y))
+               printQRBlock(x0 + (x * blockSize) + QR_QUIET_ZONE,
+                            y0 + (y * blockSize) + QR_QUIET_ZONE,
+                            blockSize,
+                            (qrcode_getModule(&QR, x, y)) ? foreGround : backGround);
+         }
+      }
+   } while (display.nextPage());
+
+   display.epd2.setSuspendRefresh(false);
+   display.refresh();
+}
+
 #if DEBUG
 void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit) {
    int foreGround = COLOR_BLACK;
    int backGround = COLOR_WHITE;
-   Serial.println("[EPD] Set Display to Test Pattern");
+   Serial.printf("[EPD] Set Display to Test Pattern (%ds)\n", displaySettings.displayQuickRefreshTime);
+
    Serial.println(displaySettings.displayQuickRefreshTime);
 
    if (doQuickRefresh) {
@@ -1202,12 +1258,105 @@ void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit) {
       // display.println(info);
    } while (display.nextPage());
 }
+
+void displayPartialTest(bool doQuickRefresh) {
+
+   int foreGround = COLOR_BLACK;
+   int backGround = COLOR_WHITE;
+
+   char msg[128];
+   sprintf(msg, "%s", "https://paperlesspaper.de/b?d=epd13-123456&w=50");
+   int testOffset = 200;
+
+   uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
+   uint8_t blockSize;
+   uint8_t page = 0;
+   qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
+   uint16_t x0 = 1100;
+   uint16_t y0 = 1500;
+   blockSize = 3;
+
+   display.setRotation(0);
+   display.setPartialWindow(x0, y0, 100, 100);
+   display.firstPage();
+   do {
+      display.fillScreen(GxEPD_WHITE);
+      u8g2_for_adafruit_gfx.setFontDirection(0);
+      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);
+      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);
+      u8g2_for_adafruit_gfx.setFontMode(1);  // use u8g2 transparent mode (this is default)
+
+      for (uint8_t y = 0; y < QR.size; y++) {
+         // Eor each horizontal module
+         for (uint8_t x = 0; x < QR.size; x++) {
+            if (qrcode_getModule(&QR, x, y))
+               printQRBlock(x0 + (x * blockSize) + QR_QUIET_ZONE,
+                            y0 + (y * blockSize) + QR_QUIET_ZONE,
+                            blockSize,
+                            (qrcode_getModule(&QR, x, y)) ? foreGround : backGround);
+         }
+      }
+   } while (display.nextPage());
+   return;
+
+   Serial.println("[EPD] partial test");
+   Serial.println(displaySettings.displayQuickRefreshTime);
+
+   if (doQuickRefresh) {
+      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
+      display.init(115200);
+
+      foreGround = displaySettings.colorBlackFast;
+      backGround = displaySettings.colorWhiteFast;
+   } else {
+      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
+      display.init(115200);
+   }
+
+   display.setRotation(displaySettings.rotationText);
+
+   // Enable suspend refresh so nextPage() won't trigger a physical screen update yet
+   display.epd2.setSuspendRefresh(true);
+   display.clearScreen(0x01);
+
+   // Draw the first area
+   display.setPartialWindow(100, 200, 300, 300);
+   display.firstPage();
+   do {
+      display.fillScreen(GxEPD_WHITE);
+      u8g2_for_adafruit_gfx.setFontDirection(0);
+      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);
+      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);
+      u8g2_for_adafruit_gfx.setFont(FONT_BIG);
+      u8g2_for_adafruit_gfx.setCursor(150, 250);
+      u8g2_for_adafruit_gfx.print("Left Controller");
+   } while (display.nextPage());
+
+   // Draw the second area
+   display.setPartialWindow(700, 200, 300, 300);
+   display.firstPage();
+   do {
+      display.fillScreen(GxEPD_WHITE);
+      u8g2_for_adafruit_gfx.setFontDirection(0);
+      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);
+      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);
+      u8g2_for_adafruit_gfx.setFont(FONT_BIG);
+      u8g2_for_adafruit_gfx.setCursor(750, 250);
+      u8g2_for_adafruit_gfx.print("Right Controller");
+   } while (display.nextPage());
+
+   // Re-enable refresh and manually trigger it once!
+   display.epd2.setSuspendRefresh(false);
+   Serial.println("[EPD] Triggering final combined refresh!");
+   display.refresh();
+}
 #endif
 
-void displayWipe(bool quick, bool useAltInit) {
+// Colors: 0:Black 1:Blue 2:Green 3:Red 4:XX 5:Yellow 6:White
+void displayWipe(bool quick, bool useAltInit, int color) {
    Serial.printf("[EPD] Display Wipe (%ds)\n", displaySettings.displayQuickRefreshWipeTime);
 
-   uint8_t wipeColor = 6;
+   uint8_t wipeColor = 6;  // default for white
    if (quick) {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshWipeTime, true);
       if (useAltInit)
@@ -1215,7 +1364,7 @@ void displayWipe(bool quick, bool useAltInit) {
       else
          display.init(115200);
       // wipeColor = 0x06;
-      wipeColor = 3;  // tested 3
+      wipeColor = displaySettings.colorWipeFast;  // tested 3
 
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshWipeTime, false);
@@ -1223,6 +1372,9 @@ void displayWipe(bool quick, bool useAltInit) {
          display.initAlt(115200);
       else
          display.init(115200);
+   }
+   if (color != wipeColor) {
+      wipeColor = color;
    }
    int colorSet = getColor(wipeColor);
    display.clearScreen(colorSet);
@@ -1270,7 +1422,7 @@ void displaySetRotation(int orientation) {
    }
 }
 
-void displaySetQuickRefresh(bool enable) {
+void displaySetQuickRefresh(bool enable, int refreshTime, int wipeTime) {
    if (displaySettings.globalQuickRefreshDisable) {
       displaySettings.quickRefresh = false;
       return;
@@ -1280,6 +1432,12 @@ void displaySetQuickRefresh(bool enable) {
 
    } else {
       displaySettings.quickRefresh = false;
+   }
+   if (refreshTime > 0) {
+      displaySettings.displayQuickRefreshTime = refreshTime;
+   }
+   if (wipeTime > 0) {
+      displaySettings.displayQuickRefreshWipeTime = wipeTime;
    }
 }
 
