@@ -67,6 +67,7 @@ struct DisplaySettings {
    int displayQuickRefreshWipeTime;
    uint16_t colorWhiteFast;
    uint16_t colorBlackFast;
+   uint8_t colorWipeFast;
 };
 
 struct Settings {

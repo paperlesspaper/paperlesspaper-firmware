@@ -32,13 +32,14 @@ DisplaySettings displaySettings = {
     .displayQuickRefreshTime = 2500,
     .displayQuickRefreshWipeTime = 2000,
     .colorWhiteFast = GxEPD_BLACK,
-    .colorBlackFast = GxEPD_BLUE
+    .colorBlackFast = GxEPD_BLUE,
 #else
     .displayQuickRefreshTime = 960,
     .displayQuickRefreshWipeTime = 960,
     .colorWhiteFast = GxEPD_WHITE_I,
-    .colorBlackFast = GxEPD_BLACK_I
+    .colorBlackFast = GxEPD_BLACK_I,
 #endif
+    .colorWipeFast = 1  // blue
 };
 
 // Hardware externs
@@ -179,12 +180,15 @@ void displayTypeDetect() {
       displaySettings.displayQuickRefreshWipeTime = 500;
       displaySettings.colorWhiteFast = GxEPD_RED;
       displaySettings.colorBlackFast = GxEPD_BLUE;
+      displaySettings.colorWipeFast = 1;  // 3
+
    } else if (memcmp(reg9A, patternOKRA1, 2) == 0 || memcmp(reg9A, patternOKRA2, 2) == 0) {
       Serial.println("[EPD] Match Found: OKRA Display");
       displaySettings.displayQuickRefreshTime = 1500;  // 1400-1700
-      displaySettings.displayQuickRefreshWipeTime = 3500;
+      displaySettings.displayQuickRefreshWipeTime = 4000;
       displaySettings.colorWhiteFast = GxEPD_YELLOW;
-      displaySettings.colorBlackFast = GxEPD_BLUE;
+      displaySettings.colorBlackFast = GxEPD_WHITE;
+      displaySettings.colorWipeFast = 1;  // blue
    } else {
       Serial.println("[EPD] No matching Type.");
       Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
@@ -1146,7 +1150,7 @@ void displaySetDownloadSleep() {
 
    uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
    qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
-   sprintf(msg, "%s", "https://paperlesspaper.de/b?d=epd13-123456&w=50");
+   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", epd_client_id, "&w=99");
 
    display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
    display.init(115200);
@@ -1189,7 +1193,8 @@ void displaySetDownloadSleep() {
 void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit) {
    int foreGround = COLOR_BLACK;
    int backGround = COLOR_WHITE;
-   Serial.println("[EPD] Set Display to Test Pattern");
+   Serial.printf("[EPD] Set Display to Test Pattern (%ds)\n", displaySettings.displayQuickRefreshTime);
+
    Serial.println(displaySettings.displayQuickRefreshTime);
 
    if (doQuickRefresh) {
@@ -1347,10 +1352,11 @@ void displayPartialTest(bool doQuickRefresh) {
 }
 #endif
 
-void displayWipe(bool quick, bool useAltInit) {
+// Colors: 0:Black 1:Blue 2:Green 3:Red 4:XX 5:Yellow 6:White
+void displayWipe(bool quick, bool useAltInit, int color) {
    Serial.printf("[EPD] Display Wipe (%ds)\n", displaySettings.displayQuickRefreshWipeTime);
 
-   uint8_t wipeColor = 6;
+   uint8_t wipeColor = 6;  // default for white
    if (quick) {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshWipeTime, true);
       if (useAltInit)
@@ -1358,7 +1364,7 @@ void displayWipe(bool quick, bool useAltInit) {
       else
          display.init(115200);
       // wipeColor = 0x06;
-      wipeColor = 3;  // tested 3
+      wipeColor = displaySettings.colorWipeFast;  // tested 3
 
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshWipeTime, false);
@@ -1366,6 +1372,9 @@ void displayWipe(bool quick, bool useAltInit) {
          display.initAlt(115200);
       else
          display.init(115200);
+   }
+   if (color != wipeColor) {
+      wipeColor = color;
    }
    int colorSet = getColor(wipeColor);
    display.clearScreen(colorSet);
@@ -1413,7 +1422,7 @@ void displaySetRotation(int orientation) {
    }
 }
 
-void displaySetQuickRefresh(bool enable) {
+void displaySetQuickRefresh(bool enable, int refreshTime, int wipeTime) {
    if (displaySettings.globalQuickRefreshDisable) {
       displaySettings.quickRefresh = false;
       return;
@@ -1423,6 +1432,12 @@ void displaySetQuickRefresh(bool enable) {
 
    } else {
       displaySettings.quickRefresh = false;
+   }
+   if (refreshTime > 0) {
+      displaySettings.displayQuickRefreshTime = refreshTime;
+   }
+   if (wipeTime > 0) {
+      displaySettings.displayQuickRefreshWipeTime = wipeTime;
    }
 }
 

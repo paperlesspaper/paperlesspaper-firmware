@@ -2335,31 +2335,23 @@ void test() {
    Serial.println("[DEBUG] Test Function");
    // gotToDeepSleep(86000, false, false);
    analogWrite(LED_PIN, 100);
-   // if (powerSupplyDisplay(true)) delay(100);
-
-   bool wifiConnected = wifiSmart();
-   debugCheck();
-   // downloadBMPToFlash(ENV_SLEEP_SCREEN_URL_13, "cover.bmp");
+   if (powerSupplyDisplay(true)) delay(100);
 
    // displaySetQrPartial();
-   delay(2000);
    // displayPartialTest(false);
-   while (true) {};
    bool quickref = true;
    int zufallszahl = random(2, 16);
-   displaySetQuickRefresh(false);
-   displayWifiActivate(false);
-   displayWipe(true);
-   displaySetBlankTest(zufallszahl, true);
-   while (true) {};
+   /*
+      displaySetQuickRefresh(true, 1500, 500);
+      displayWipe(true);
+      displaySetBlankTest(zufallszahl, true);
+      delay(10000);
+      setImageFromFS("cover.bmp");
+      // displayWipe(false, false, 3);
+      // displaySetText("test", false, quickref);
+      // displayPartialTest(false);
 
-   // displayWipe(true);
-   // displaySetBlankTest(zufallszahl, true);
-   displaySetQuickRefresh(true);
-
-   // displaySetText("test", false, quickref);
-   displayPartialTest(false);
-   while (true) {};
+      while (true) {};*/
    displayOtaScreen();
    delay(2000);
    displaySetText("test", false, quickref);
@@ -2375,12 +2367,13 @@ void test() {
    displaySetText("test black", true, quickref);
    delay(2000);
    displaySetBlankTest(zufallszahl, true);
-   displayWipe(false);
-   // displaySetBlankTest(2, true);
-   // setImageFromFS("tmp.gz");
-   //   copyFileFromFlashToSD("tmp.gz", "testfile.gz");
-   //   setImageFromSDDirect("testfile.gz");
-   //    setImageFromFS("tmp.gz");
+   setImageFromFS("cover.bmp");
+   // displayWipe(false);
+   //  displaySetBlankTest(2, true);
+   //  setImageFromFS("tmp.gz");
+   //    copyFileFromFlashToSD("tmp.gz", "testfile.gz");
+   //    setImageFromSDDirect("testfile.gz");
+   //     setImageFromFS("tmp.gz");
 
    while (true) {
       float temperature = temperatureRead();
