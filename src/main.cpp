@@ -47,7 +47,6 @@
 #define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
 
 #ifdef EPD_TYPE_13INCH
-
 #define OTA_URL ENV_OTA_URL_13
 #define OTA_URL_DEV ENV_OTA_URL_DEV_13
 #else
@@ -234,6 +233,7 @@ int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly
 bool powerSupplyDisplay(bool enable);
 bool sdInit(bool forceFormat = false);
 void sdTest(bool doLog = false);
+bool downloadBMPToFlash(const char* url, const char* filename, bool forceDownload = false);
 wakeup_reason_t getWakeupReason();
 
 void WiFiEvent(WiFiEvent_t event) {
@@ -310,58 +310,58 @@ void iotReceiveHandler(String& topic, String& payload) {
    }
 
    if (doc["t"].is<long>()) {
-         newVersionSave = doc["t"].as<long>();
-         isNewVersion = true;
-      }
+      newVersionSave = doc["t"].as<long>();
+      isNewVersion = true;
+   }
 
-      if (doc["act"].is<JsonString>()) {
-         const char* activated;
-         activated = doc["act"];
-         if (strcmp(activated, "activated") == 0) {
-            Serial.println("[AWS RX] Device is activated");
-            if (doc["key"].is<JsonString>()) {
-               const char* devicekey = doc["key"];
-               sprintf(CLIENT_KEY, "%s", devicekey);
-               // TODO: Maybe use this for activation
-            }
-            if (doc["lut"].is<JsonString>()) {
-               const char* lut = doc["lut"];
-               settings.lut = lut;
-            }
-            if (doc["timeout"].is<int>()) {
-               settings.timeout = doc["timeout"].as<int>();
-               if (settings.timeout < 60) {
-                  settings.timeout = 60;  // minimum timeout 60 seconds TODO: add trigger to keep device always on
-               }
-            }
-            if (doc["clearscreen"].is<bool>()) {
-               settings.clearscreen = doc["clearscreen"].as<bool>();
-            }
-            if (doc["sleepdisabled"].is<bool>()) {
-               settings.sleepDisabled = doc["sleepdisabled"].as<bool>();
-            }
-            if (doc["overlay"].is<bool>()) {
-               bool showOverlay = doc["overlay"].as<bool>();
-               if (showOverlay) {
-                  settings.showWifiWarning = true;
-                  settings.showBatteryWarning = true;
-               } else {
-                  settings.showWifiWarning = false;
-                  settings.showBatteryWarning = false;
-               }
-            }
-            Serial.printf("[AWS RX] SETTINGS - Sleep: %d (disable:%d) Lut: %s Overlay: %d-%d \n", settings.timeout, settings.sleepDisabled, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
-            deviceActivated = true;
+   if (doc["act"].is<JsonString>()) {
+      const char* activated;
+      activated = doc["act"];
+      if (strcmp(activated, "activated") == 0) {
+         Serial.println("[AWS RX] Device is activated");
+         if (doc["key"].is<JsonString>()) {
+            const char* devicekey = doc["key"];
+            sprintf(CLIENT_KEY, "%s", devicekey);
+            // TODO: Maybe use this for activation
          }
-         if (strcmp(activated, "not_started") == 0) {
-            Serial.println("[AWS RX] Device activation not started");
-            deviceActivationNotStarted = true;
+         if (doc["lut"].is<JsonString>()) {
+            const char* lut = doc["lut"];
+            settings.lut = lut;
          }
-         if (strcmp(activated, "reset") == 0) {
-            Serial.println("[AWS RX] Device activation reset");
-            deviceActivationReset = true;
+         if (doc["timeout"].is<int>()) {
+            settings.timeout = doc["timeout"].as<int>();
+            if (settings.timeout < 60) {
+               settings.timeout = 60;  // minimum timeout 60 seconds TODO: add trigger to keep device always on
+            }
          }
+         if (doc["clearscreen"].is<bool>()) {
+            settings.clearscreen = doc["clearscreen"].as<bool>();
+         }
+         if (doc["sleepdisabled"].is<bool>()) {
+            settings.sleepDisabled = doc["sleepdisabled"].as<bool>();
+         }
+         if (doc["overlay"].is<bool>()) {
+            bool showOverlay = doc["overlay"].as<bool>();
+            if (showOverlay) {
+               settings.showWifiWarning = true;
+               settings.showBatteryWarning = true;
+            } else {
+               settings.showWifiWarning = false;
+               settings.showBatteryWarning = false;
+            }
+         }
+         Serial.printf("[AWS RX] SETTINGS - Sleep: %d (disable:%d) Lut: %s Overlay: %d-%d \n", settings.timeout, settings.sleepDisabled, settings.lut, settings.showWifiWarning, settings.showBatteryWarning);
+         deviceActivated = true;
       }
+      if (strcmp(activated, "not_started") == 0) {
+         Serial.println("[AWS RX] Device activation not started");
+         deviceActivationNotStarted = true;
+      }
+      if (strcmp(activated, "reset") == 0) {
+         Serial.println("[AWS RX] Device activation reset");
+         deviceActivationReset = true;
+      }
+   }
 }
 void ledBlinkFunctionOff() {
    analogWrite(LED_PIN, 0);
@@ -592,8 +592,8 @@ bool wifiSmart() {
 
    if (isWifi == false && isTestMode == false && doReset == false) {
       powerSupplyDisplay(true);
+      wifiTimeout = 5000UL;
       updateDisplayAsync("wifiactivate");
-      wifiTimeout = 3000UL;
    }
    // try to connect to current wifi
    wifiSettings.wifiRetries = 0;
@@ -1095,6 +1095,86 @@ int downloadAndSaveFile(String fileName, String url) {
    }
    http.end();
    return success;
+}
+
+bool downloadBMPToFlash(const char* url, const char* filename, bool forceDownload) {
+   if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[BMP] Download failed: WiFi not connected");
+      return false;
+   }
+
+   // Prepare flash
+   if (SerialFlash.exists(filename)) {
+      SerialFlashFile tempFile = SerialFlash.open(filename);
+      if (forceDownload) {
+         Serial.print("[BMP] File Exists, redownload start... ");
+         SerialFlash.remove(tempFile);
+      } else {
+         Serial.print("[BMP] File Exists, skip download... ");
+         return true;
+      }
+   }
+
+   HTTPClient http;
+   Serial.println(url);
+
+   http.begin(url);
+   int httpCode = http.GET();
+
+   if (httpCode != HTTP_CODE_OK) {
+      Serial.printf("[BMP] HTTP GET failed, code: %d\n", httpCode);
+      http.end();
+      return false;
+   }
+
+   int len = http.getSize();
+   if (len <= 0) {
+      Serial.println("[BMP] Invalid file size");
+      http.end();
+      return false;
+   }
+
+   if (!SerialFlash.createErasable(filename, len)) {
+      SerialFlash.eraseAll();
+      while (SerialFlash.ready() == false) {
+         delay(100);
+      }
+      if (!SerialFlash.createErasable(filename, len)) {
+         Serial.println("[BMP] Failed to create file in flash");
+         http.end();
+         return false;
+      }
+   }
+
+   SerialFlashFile file = SerialFlash.open(filename);
+   if (!file) {
+      Serial.println("[BMP] Failed to open file in flash");
+      http.end();
+      return false;
+   }
+
+   WiFiClient* stream = http.getStreamPtr();
+   uint8_t buffer[1024];
+   int bytesWritten = 0;
+
+   if (DEBUG_FLAG) Serial.println("[BMP] Streaming to SerialFlash...");
+   int bytesLeft = len;
+   while (http.connected() && bytesLeft > 0) {
+      size_t size = stream->available();
+      if (size > 0) {
+         int c = stream->readBytes(buffer, ((size > sizeof(buffer)) ? sizeof(buffer) : size));
+         file.write(buffer, c);
+         bytesWritten += c;
+         bytesLeft -= c;
+      } else {
+         delay(1);
+      }
+   }
+
+   file.close();
+   http.end();
+   Serial.printf("[BMP] Download complete. Wrote %d bytes to %s\n", bytesWritten, filename);
+   return true;
 }
 
 // https://github.com/zenmanenergy/ESP8266-Arduino-Examples/blob/master/helloWorld_urlencoded/urlencode.ino
@@ -1774,6 +1854,7 @@ void startupCounter(int reset) {
    unsigned int counter = preferences.getUInt("counter", 0);
    counter++;
    if (reset || counter > 16) {
+      tickerStatupCounter.detach();
       StartCounter = 0;
       counter = 0;
       Serial.println("[MAIN] Startup Counter RESET");
@@ -1831,10 +1912,17 @@ void debugCheck() {
    resetAll(false, true);
    setDisplayData(CLIENT_ID, systemData.vddValue);
    printDebugInfo();
-   waitDisplayComplete(false);
-   displaySetQuickRefresh(true);
    powerSupplyDisplay(true);
-   displayDebugInfo();
+   waitDisplayComplete(false);
+   displaySetQuickRefresh(false);
+
+   bool success = downloadBMPToFlash(ENV_SLEEP_SCREEN_URL_13, "cover.bmp");
+   if (success) {
+      displaySetDownloadSleep();
+   } else {
+      displayDebugInfo();
+   }
+
    delay(2000);
    gotToDeepSleep(DEFAULT_SLEEP, false, false);  // dont show the deep sleep screen stay with debug info
    return;
@@ -2238,6 +2326,7 @@ void checkDeviceBatch(int set = 0, int useMem = false) {
          Serial.printf("[SETUP] set device revision to default (paper 7)\n");
    }
 }
+
 void test() {
    // checkDeviceBatch(0);
    //  adcAttachPin(14);  // Any pin that is ADC capable
@@ -2245,24 +2334,32 @@ void test() {
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
    // gotToDeepSleep(86000, false, false);
-   if (powerSupplyDisplay(true)) delay(100);
+   analogWrite(LED_PIN, 100);
+   // if (powerSupplyDisplay(true)) delay(100);
 
+   bool wifiConnected = wifiSmart();
+   debugCheck();
+   // downloadBMPToFlash(ENV_SLEEP_SCREEN_URL_13, "cover.bmp");
+
+   // displaySetQrPartial();
+   delay(2000);
+   // displayPartialTest(false);
+   while (true) {};
    bool quickref = true;
    int zufallszahl = random(2, 16);
-   analogWrite(LED_PIN, 100);
-   /*
-      displaySetQuickRefresh(false);
-      displayWifiActivate(false);
-      displayWipe(true);
-      displaySetBlankTest(zufallszahl, true);
-      while (true) {};*/
+   displaySetQuickRefresh(false);
+   displayWifiActivate(false);
+   displayWipe(true);
+   displaySetBlankTest(zufallszahl, true);
+   while (true) {};
 
    // displayWipe(true);
    // displaySetBlankTest(zufallszahl, true);
+   displaySetQuickRefresh(true);
 
-   debugCheck();
+   // displaySetText("test", false, quickref);
+   displayPartialTest(false);
    while (true) {};
-
    displayOtaScreen();
    delay(2000);
    displaySetText("test", false, quickref);
@@ -2424,7 +2521,7 @@ void setup() {
    }
 
 #if DEBUG
-   // test();  //-----------------test---------please remove
+   test();  //-----------------test---------please remove
 #endif
    tickerFailsave.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
    testModeCheck();                   // check if needs to enter deploy state

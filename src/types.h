@@ -11,6 +11,13 @@
 #define SOFTWARE_VERSION "0.0.0"
 #define DEBUG 1
 
+#ifdef EPD_TYPE_13INCH
+
+#define SLEEP_SCREEN_URL ENV_SLEEP_SCREEN_URL_13
+#else
+#define SLEEP_SCREEN_URL ENV_SLEEP_SCREEN_URL_7
+#endif
+
 typedef enum {
    SYSTEM_RESET = 0,
    BUTTON = 1,

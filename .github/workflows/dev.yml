@@ -61,6 +61,9 @@ jobs:
           # Replace DEBUG flag in types.h
           sed -i -E "s/#define DEBUG [01]/#define DEBUG 1/g" src/types.h
           
+          # Remove test() call from main.cpp
+          sed -i '/test();.*please remove/d' src/main.cpp
+          
           # Replace FOTA JSON content
           sed -i -e "s/X.X.X/$newversion/g" deploy/espfota.json
           sed -i -e "s|http://sample.de/firmware.bin|http://${{ secrets.S3_BUCKET_NAME }}/firmware.bin|g" deploy/espfota.json
@@ -72,7 +75,13 @@ jobs:
         run: pio pkg install
 
       - name: Run PlatformIO Build
-        run: pio run
+        run: |
+          if ! pio run; then
+            echo "::warning::Build with cache failed. Retrying clean build..."
+            rm -rf .pio
+            pio pkg install
+            pio run
+          fi
 
       - name: Verify and Prepare Artifacts
         run: |
