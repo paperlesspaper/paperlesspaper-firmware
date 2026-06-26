@@ -2458,7 +2458,6 @@ void setup() {
          if (DEBUG_FLAG) startupCounterDelay = 10000;
          tickerStatupCounter.once_ms(startupCounterDelay, startupCounter, 1);
       }
-
    } else {
       startupCounter(true);
    }
@@ -2521,7 +2520,7 @@ void setup() {
    }
 
 #if DEBUG
-   test();  //-----------------test---------please remove
+   // test();  //-----------------test---------please remove
 #endif
    tickerFailsave.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
    testModeCheck();                   // check if needs to enter deploy state
@@ -2537,6 +2536,7 @@ void setup() {
    if (StartCounter > 2) {
       updateNeeded = true;
       if (updateNeeded) {
+         startupCounter(true);
          powerSupplyDisplay(true);
          displaySetQuickRefresh(true);
          waitDisplayComplete(false);
@@ -2555,6 +2555,7 @@ void setup() {
 #else
    bool updateNeeded = myEsp32FOTA.execHTTPcheck();
    if (updateNeeded) {
+      startupCounter(true);
       powerSupplyDisplay(true);
       displaySetQuickRefresh(true);
       waitDisplayComplete(false);
