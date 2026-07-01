@@ -308,7 +308,8 @@ int setImageFromFS_7inch(String fileName) {
          offsetData = bmpOffset;
          Serial.printf("[BMP] Detected Windows BMP. Pixel Data starts at offset: %d\n", offsetData);
       } else {
-         Serial.println("[BMP] Detected RAW payload (no BM magic). Reading from byte 0.");
+         Serial.println("[BMP] Detected RAW payload (no BM magic). Reading from byte 4.");
+         offsetData = 4;
       }
    }
 
@@ -350,7 +351,7 @@ int setImageFromFS_7inch(String fileName) {
    return 0;
 }
 
-int setImageFromFS_13inch(String fileName) {
+int setImageFromFS_13inch(String fileName, bool doRefresh) {
    saveFile = SerialFlash.open(fileName.c_str());
    if (!saveFile) {
       Serial.println("[BMP] File missing");
@@ -373,8 +374,8 @@ int setImageFromFS_13inch(String fileName) {
          offsetData = bmpOffset;
          Serial.printf("[BMP] Detected Windows BMP. Pixel Data starts at offset: %d\n", offsetData);
       } else {
-         Serial.println("[BMP] Detected RAW payload (no BM magic). Reading from byte 0.");
-         offsetData = 0;
+         Serial.println("[BMP] Detected RAW payload (no BM magic). Reading from byte 4.");
+         offsetData = 4;
       }
    }
 
@@ -510,18 +511,20 @@ int setImageFromFS_13inch(String fileName) {
    for (int i = 0; i < 9; i++) epd_spi_bus->transfer(0x00);
    digitalWrite(EPD_CS_S, HIGH);
 
-   display.refresh();
+   if (doRefresh) {
+      display.refresh();
+   }
 
    saveFile.close();
 
    return 0;
 }
 
-int setImageFromFS(String fileName) {
+int setImageFromFS(String fileName, bool doRefresh) {
    epaperIsUpdating = true;
 
 #ifdef EPD_TYPE_13INCH
-   return setImageFromFS_13inch(fileName);
+   return setImageFromFS_13inch(fileName, doRefresh);
 #else
    return setImageFromFS_7inch(fileName);
 #endif
@@ -972,7 +975,7 @@ void displayTurnOn() {
          }
       }
 
-      displayOverlays(display, displayInfos, true, true);
+      displayOverlays(display, displayInfos, true, fullColor);
 
    } while (display.nextPage());
 }
