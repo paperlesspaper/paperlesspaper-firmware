@@ -1055,17 +1055,17 @@ int downloadAndSaveFile(String fileName, String url) {
 
          WiFiClient* stream = http.getStreamPtr();
          size_t downloaded_data_size = 0;
-         while (http.connected() && (len > 0 || len == -1)) {
-            // Available limited to 16328 bytes. Might be TLS segementation.
+         int bytesLeft = len;
+
+         while (http.connected() && (bytesLeft > 0 || len == -1)) {
             size_t size = stream->available();
-            if (size) {
+            if (size > 0) {
                int c = stream->readBytes(buff, ((size > buff_size) ? buff_size : size));
-               // Serial.printf("[DL] Downloaded: %d / %d\n", c, size);
                saveFile.write(buff, c);
-               if (len > 0) {
-                  len -= c;
+               if (bytesLeft > 0) {
+                  bytesLeft -= c;
                }
-               downloaded_data_size += size;
+               downloaded_data_size += c;
             } else {
                delay(1);
             }
@@ -2341,6 +2341,20 @@ void test() {
    // displayPartialTest(false);
    bool quickref = true;
    int zufallszahl = random(2, 16);
+
+   wifiSmart();
+
+   // 1. Download image
+   getImageUrl(false);
+   loadImageFromWeb(DL_URL, "aws.bmp");
+   setImageFromFS("aws.bmp");
+
+   // 2. Stream to controller RAM but DO NOT refresh
+   delay(10000);
+   downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/test_13.bmp", "test.bmp");
+   setImageFromFS("test.bmp");
+   while (true) {};
+
    /*
       displaySetQuickRefresh(true, 1500, 500);
       displayWipe(true);
