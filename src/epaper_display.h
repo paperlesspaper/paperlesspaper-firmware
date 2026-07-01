@@ -38,12 +38,14 @@
 #define EPD_HEIGHT 1200
 #define EPD_QR_SIZE_SMALL 3
 #define EPD_QR_SIZE_BIG 12
+#define SCREEN_OFFSET 200  // level of space between lines to match different screen sizes
 using DisplayType = GxEPD2_7C<GxEPD2_1330c_EL133UF3, GxEPD2_1330c_EL133UF3::HEIGHT / 8>;
 #else
 #define EPD_WIDTH 800
 #define EPD_HEIGHT 480
 #define EPD_QR_SIZE_SMALL 2
-#define EPD_QR_SIZE_BIG 8
+#define EPD_QR_SIZE_BIG 6
+#define SCREEN_OFFSET 100  // level of space between lines to match different screen sizes
 using DisplayType = GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT / 4>;
 #endif
 
@@ -71,7 +73,7 @@ void displayOtaScreen();
 void displayNoPicture();
 void displayTurnOn();
 void displayWifiActivate(bool wifiProvisioningDone);
-void displaySetDownloadSleep();
+void displaySetDownloadSleep_13();
 void displayWipe(bool quick, bool useAltInit = false, int color = 6);
 void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit = false);
 void displayPartialTest(bool doQuickRefresh = false);
