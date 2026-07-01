@@ -24,16 +24,16 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
       - name: Restore PlatformIO Cache
         id: cache-pio-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.platformio
@@ -104,7 +104,7 @@ jobs:
 
       - name: Save PlatformIO Cache
         if: steps.cache-pio-restore.outputs.cache-matched-key == '' || steps.build.outputs.rebuild == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.platformio
@@ -124,7 +124,7 @@ jobs:
           cp ./deploy/espfota.json ./artifact/espfota_${{ matrix.suffix }}_dev.json
 
       - name: Publish Pipeline Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: epaper_fw_${{ matrix.suffix }}_dev_${{ env.FW_VERSION }}
           path: artifact/
@@ -136,12 +136,12 @@ jobs:
     
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: all-artifacts
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
