@@ -126,7 +126,7 @@ jobs:
       - name: Publish Pipeline Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: epaper_fw_${{ matrix.suffix }}_dev_b${{ env.FW_VERSION }}
+          name: epaper_fw_${{ matrix.suffix }}_dev_${{ env.FW_VERSION }}
           path: artifact/
 
   deploy:
