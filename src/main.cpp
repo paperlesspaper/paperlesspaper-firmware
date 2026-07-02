@@ -202,7 +202,7 @@ char DL_URL[50];
 #define BLE_BUFFER_SIZE 19200
 uint16_t bleWriteBufferPos = 0;
 bool fwUpdateInProgress = false;
-uint8_t bleWriteBuffer[BLE_BUFFER_SIZE];
+uint8_t* bleWriteBuffer = nullptr;
 uint32_t calcCRC32(const uint8_t* data, size_t len) {
    return crc32_le(0, data, len);
 }
@@ -812,8 +812,10 @@ bool wifiSmart() {
 String getRedirect(String url) {
    HTTPClient http;
    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
-   if (url.indexOf("https://") > 0) {
-      http.begin(url, cert);
+   WiFiClientSecure secureClient;
+   secureClient.setInsecure();
+   if (url.indexOf("https:") >= 0) {
+      http.begin(secureClient, url);
    } else {
       http.begin(url);
    }
@@ -845,6 +847,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
    void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
       Serial.printf("\n[BLE] Client disconnected");
       isBleClientConnected = false;
+      if (bleWriteBuffer != nullptr) {
+         free(bleWriteBuffer);
+         bleWriteBuffer = nullptr;
+      }
+      fwUpdateInProgress = false;
       if (wifiSettings.bleInitOk) {
          Serial.printf("\n[BLE] restart advertising...\n[");
          NimBLEDevice::startAdvertising();
@@ -876,27 +883,42 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
          String cmd = pCharacteristic->getValue().c_str();
          Serial.printf("[BLE] Upload CMD: %s\n", cmd.c_str());
          if (cmd == "START_FW") {
+            if (bleWriteBuffer == nullptr) {
+               bleWriteBuffer = (uint8_t*)malloc(BLE_BUFFER_SIZE);
+            }
+            if (bleWriteBuffer == nullptr) {
+               Serial.println("[BLE] ERROR: Failed to allocate memory for firmware buffer!");
+               return;
+            }
             fwUpdateInProgress = true;
             bleWriteBufferPos = 0;
             tickerFailsave.detach();
             if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                Update.printError(Serial);
+               if (bleWriteBuffer != nullptr) {
+                  free(bleWriteBuffer);
+                  bleWriteBuffer = nullptr;
+               }
             } else {
                Serial.println("[BLE] Firmware Update STARTED.");
             }
          } else if (cmd == "FLUSH") {
-            if (fwUpdateInProgress && bleWriteBufferPos > 0) {
+            if (fwUpdateInProgress && bleWriteBufferPos > 0 && bleWriteBuffer != nullptr) {
                Update.write(bleWriteBuffer, bleWriteBufferPos);
                bleWriteBufferPos = 0;
             }
          } else if (cmd == "CLEAR") {
             bleWriteBufferPos = 0;
          } else if (cmd == "END_FW") {
-            if (fwUpdateInProgress && bleWriteBufferPos > 0) {
+            if (fwUpdateInProgress && bleWriteBufferPos > 0 && bleWriteBuffer != nullptr) {
                Update.write(bleWriteBuffer, bleWriteBufferPos);
                bleWriteBufferPos = 0;
             }
             fwUpdateInProgress = false;
+            if (bleWriteBuffer != nullptr) {
+               free(bleWriteBuffer);
+               bleWriteBuffer = nullptr;
+            }
             if (Update.end(true)) {
                Serial.println("[BLE] Firmware Update SUCCESS. Rebooting...");
                delay(500);
@@ -908,7 +930,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
          }
       } else if (uuidStr == "10000003-0000-0000-0000-000000000001") {
          const uint8_t* pData = pCharacteristic->getValue().data();
-         if (fwUpdateInProgress && pData && dataLen > 4) {
+         if (fwUpdateInProgress && pData && dataLen > 4 && bleWriteBuffer != nullptr) {
             uint32_t packetCrc = pData[0] | (pData[1] << 8) | (pData[2] << 16) | (pData[3] << 24);
             size_t actualDataLen = dataLen - 4;
             uint32_t calculatedCrc = calcCRC32(pData + 4, actualDataLen);
@@ -1093,16 +1115,18 @@ int downloadAndSaveFile(String fileName, String url) {
    http.setTimeout(10000);
    http.setReuse(true);
 
+   WiFiClientSecure secureClient;
+   secureClient.setInsecure();
+
    if (url.indexOf("https:") >= 0) {
       Serial.println("[DL] Download HTTPS");
-      http.begin(url, cert);
+      http.begin(secureClient, url);
    } else {
       Serial.println("[DL] Download HTTP");
       http.begin(url);
    }
 
    int httpCode = http.GET();
-
    if (httpCode > 0) {
       // file found at server
       if (httpCode == HTTP_CODE_OK) {
@@ -1137,7 +1161,7 @@ int downloadAndSaveFile(String fileName, String url) {
 
          Serial.print("[DL] Download Size: ");
          Serial.println(len);
-         int buff_size = 8192;
+         int buff_size = 2048;
          unsigned char* buff = (unsigned char*)malloc(buff_size);
 
          WiFiClient* stream = http.getStreamPtr();
@@ -1178,6 +1202,7 @@ int downloadAndSaveFile(String fileName, String url) {
       }
    } else {
       Serial.println("[DL] Error on HTTP request");
+      Serial.println(httpCode);
       success = -2;
    }
    http.end();
@@ -1449,6 +1474,7 @@ bool awsConnect(bool connect) {
    if (!connect) {
       Serial.println("[AWS] DISCONNECTED");
       client.disconnect();
+      net.stop();
       return false;
    }
    if (client.connected()) {
@@ -2432,12 +2458,13 @@ void test() {
    // displayPartialTest(false);
    bool quickref = true;
    int zufallszahl = random(2, 16);
-   // wifiSmart();
+   wifiSmart();
    displaySetQuickRefresh(false);
 
-   // downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/cover.bmp", "cover.bmp", true);
-   //  setImageFromFS("test.bmp");
-   displaySetDownloadSleep_13();
+   getImageUrl(false);
+   String fileName = "tmp.gz";
+   int dlSuccess = loadImageFromWeb(DL_URL, fileName);
+   setImageFromFS(fileName);
 
    while (true) {
       delay(5000);
@@ -2471,9 +2498,6 @@ void test() {
    };*/
 
    // 1. Download image
-   getImageUrl(false);
-   loadImageFromWeb(DL_URL, "aws.bmp");
-   setImageFromFS("aws.bmp");
 
    // 2. Stream to controller RAM but DO NOT refresh
    // delay(10000);
@@ -2594,7 +2618,7 @@ void setup() {
 
    Serial.printf("[MAIN] INIT Device V: %s\n", firmwareVersion);
    if (DEBUG_FLAG) Serial.printf("[MAIN] Current counter value: %u VDD: %d\n", StartCounter, systemData.vddValue);
-   if (!SPIFFS.begin(true)) {
+   if (!SPIFFS.begin()) {
       Serial.println("[MEM] SPIFFS initialisation failed!");
    }
    debugFS();
@@ -2634,31 +2658,26 @@ void setup() {
    ledBlink(500, true, LED_DIM_VALUE);
    tickerFailsave.detach();
    tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
-
+   bool updateNeeded = false;
 #if DEBUG
-   bool updateNeeded = myEsp32FOTA.execHTTPcheck();
+   updateNeeded = myEsp32FOTA.execHTTPcheck();
    Serial.printf("[OTA] V: %s OTA Needed: %d Set URL: %s \n", SOFTWARE_VERSION, updateNeeded, OTA_URL_DEV);
    if (StartCounter > 2) {
-      updateNeeded = true;
-      if (updateNeeded) {
-         startupCounter(true);
-         powerSupplyDisplay(true);
-         displaySetQuickRefresh(true);
-         waitDisplayComplete(false);
-         delay(200);
-         displaySetText("DEV OTA Update...", true, true);
-         ledBlink(2000, true, LED_DIM_VALUE);
-         Serial.println("[OTA] Dev OTA Started.....");
-         writeIntToFlash(0, 170);
-         resetAll(false, false);
-         myEsp32FOTA.execOTA();
-         delay(2000);
-      } else {
-         Serial.println("[OTA] Dev no OTA needed");
-      }
+      startupCounter(true);
+      powerSupplyDisplay(true);
+      displaySetQuickRefresh(true);
+      waitDisplayComplete(false);
+      delay(200);
+      displaySetText("DEV OTA Update...", true, true);
+      ledBlink(2000, true, LED_DIM_VALUE);
+      Serial.println("[OTA] Dev OTA Started.....");
+      writeIntToFlash(0, 170);
+      resetAll(false, false);
+      myEsp32FOTA.execOTA();
+      delay(2000);
    }
 #else
-   bool updateNeeded = myEsp32FOTA.execHTTPcheck();
+   updateNeeded = myEsp32FOTA.execHTTPcheck();
    if (updateNeeded) {
       startupCounter(true);
       powerSupplyDisplay(true);
@@ -2716,6 +2735,7 @@ void setup() {
             actCounter = 0;
          }
          if (actCounter % 3 == 0) {
+            if (powerSupplyDisplay(true)) delay(100);
             displayWifiActivate(true);
          }
          if (actCounter < maxCounter) {
@@ -2739,6 +2759,7 @@ void setup() {
    // if (DEBUG_FLAG) isUpdate = true;  // TODO: remove in production, only for testing
    if (!isUpdate) {
       if (newVersionSave <= 0) {
+         if (powerSupplyDisplay(true)) delay(100);
          if (DEBUG_FLAG) setUpdateState("update_checked_nopicture");
          displayNoPicture();
       } else {
@@ -2762,7 +2783,12 @@ void setup() {
    }
 
    bool success = getImageUrl(false);
-   // awsConnect(false);
+   if (!success) {
+      setUpdateState("update_failed");
+      delay(500);
+      gotToDeepSleep(systemData.sleepPrediction);
+   }
+
    esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
    delay(10);
 }
@@ -2770,8 +2796,10 @@ void setup() {
 void loop() {
    if (downloadStart) {
       if (WiFi.status() == WL_CONNECTED) {
+         int setSuccess = 0;
          downloadStart = false;
          delay(200);
+         awsConnect(false);  // Disconnect AWS to free RAM for HTTPS download!
          String fileName = "tmp.gz";
          int dlSuccess = loadImageFromWeb(DL_URL, fileName);
          if (DEBUG_FLAG) setUpdateState("download_ok");  // also connects aws
@@ -2779,7 +2807,9 @@ void loop() {
          WiFi.setSleep(true);
          esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
          waitDisplayComplete(false);
-         int setSuccess = setImageFromFS(fileName);
+         if (dlSuccess == 0) {
+            int setSuccess = setImageFromFS(fileName);
+         }
          Serial.println("[EPD] Set Image Done");
          delay(500);
          debugFS();
