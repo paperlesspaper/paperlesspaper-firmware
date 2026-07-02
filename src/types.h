@@ -4,8 +4,8 @@
 // ==========================================
 // DISPLAY SELECTION
 // ==========================================
-// #define EPD_TYPE_13INCH
-#define EPD_TYPE_7INCH
+ #define EPD_TYPE_13INCH
+//#define EPD_TYPE_7INCH
 //   ==========================================
 
 #define SOFTWARE_VERSION "0.0.0"
