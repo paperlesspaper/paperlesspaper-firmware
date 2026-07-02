@@ -2026,6 +2026,7 @@ void debugCheck() {
    setDisplayData(CLIENT_ID, systemData.vddValue);
    printDebugInfo();
    powerSupplyDisplay(true);
+   delay(150);
    waitDisplayComplete(false);
    displaySetQuickRefresh(false);
 
@@ -2461,6 +2462,11 @@ void test() {
    wifiSmart();
    displaySetQuickRefresh(false);
 
+   downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/cover.bmp", "cover.bmp", true);
+   displaySetDownloadSleep_13();
+   while (true) {
+      delay(5000);
+   }
    getImageUrl(false);
    String fileName = "tmp.gz";
    int dlSuccess = loadImageFromWeb(DL_URL, fileName);
@@ -2596,6 +2602,7 @@ void setup() {
    pinMode(CS_SD_PIN, OUTPUT);
    pinMode(SCK_PIN, OUTPUT);
    pinMode(MOSI_PIN, OUTPUT);
+   pinMode(MISO_PIN, INPUT_PULLUP);
    digitalWrite(CS_SD_PIN, HIGH);
 
    gpio_set_drive_capability((gpio_num_t)SCK_PIN, GPIO_DRIVE_CAP_1);
