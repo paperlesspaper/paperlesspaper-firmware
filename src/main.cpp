@@ -12,9 +12,11 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <SerialFlash.h>
+#include <Update.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <esp32fota.h>
+#include <rom/crc.h>
 #include <rom/rtc.h>
 
 #include "EEPROM.h"
@@ -90,7 +92,7 @@ const char* crtFileCons;
 #define VDD_CORRECTION_FACTOR 6.68
 #else
 #define EPD_TYPE_IDENTIFIER "epd7-"
-#define VDD_CORRECTION_FACTOR 2.30
+#define VDD_CORRECTION_FACTOR 2.28
 #endif
 
 #define BAT_LOW_VALUE 4300
@@ -197,6 +199,14 @@ char CLIENT_KEY[30];
 char TOPIC_RECEIVE[64];
 char DL_URL[50];
 
+#define BLE_BUFFER_SIZE 19200
+uint16_t bleWriteBufferPos = 0;
+bool fwUpdateInProgress = false;
+uint8_t bleWriteBuffer[BLE_BUFFER_SIZE];
+uint32_t calcCRC32(const uint8_t* data, size_t len) {
+   return crc32_le(0, data, len);
+}
+
 bool downloadStart = true;
 bool deviceActivated = false;
 bool deviceActivationNotStarted = false;
@@ -209,6 +219,7 @@ bool isTestMode = false;  // enabled if the device is in deployment and tests ar
 bool buttonWake = false;  // true if wakeup via reset button
 bool stopAccRecheck = false;
 bool isOrientUpdate = false;
+bool isBleClientConnected = false;
 
 void ledBlink(int timeout, bool on, int dimValue = 100);
 bool awsConnect(bool connect);
@@ -642,9 +653,11 @@ bool wifiSmart() {
       int loopCount = 0;
       // loop to check bluetooth wifi change
       while (WiFi.status() != WL_CONNECTED) {
-         loopCount++;
          delay(1000);
-         Serial.print("o");
+         if (!isBleClientConnected) {
+            loopCount++;
+            Serial.print("o");
+         }
          if (loopCount > RECONNECT_LOOP_TIME) {
             Serial.printf("\n[NETWORK] BLE reprovisioning is over, sleep: %d s\n", settings.timeout);
             break;
@@ -664,8 +677,10 @@ bool wifiSmart() {
       int countAttempt = 0;
       int failedCounter = 0;
       while (true) {
-         countAttempt++;
-         Serial.print(".");
+         if (!isBleClientConnected) {
+            countAttempt++;
+            Serial.print(".");
+         }
          delay(250);
          if (countAttempt % (4 * 10) == 0) {
             // this gets triggered every 10 seconds on provisioning
@@ -822,12 +837,14 @@ class ServerCallbacks : public NimBLEServerCallbacks {
    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
       Serial.printf("\n[BLE]Client address: %s\n", connInfo.getAddress().toString().c_str());
       pServer->updateConnParams(connInfo.getConnHandle(), 24, 48, 0, 180);
+      isBleClientConnected = true;
       if (wifiSettings.bleInitOk) {
          NimBLEDevice::startAdvertising();
       }
    }
    void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
       Serial.printf("\n[BLE] Client disconnected");
+      isBleClientConnected = false;
       if (wifiSettings.bleInitOk) {
          Serial.printf("\n[BLE] restart advertising...\n[");
          NimBLEDevice::startAdvertising();
@@ -841,27 +858,89 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
    void onRead(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
+      std::string uuidStr = pCharacteristic->getUUID().toString();
+      if (uuidStr == "10000004-0000-0000-0000-000000000001") {
+         pCharacteristic->setValue((uint8_t*)&bleWriteBufferPos, 2);
+         return;
+      }
       Serial.printf("%s : onRead(), value: %s\n",
                     pCharacteristic->getUUID().toString().c_str(),
                     pCharacteristic->getValue().c_str());
    };
 
    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
-      char charType[128];
-      char charValue[128];
-      sprintf(charType, "%s", pCharacteristic->getUUID().toString().c_str());
-      sprintf(charValue, "%s", pCharacteristic->getValue().c_str());
-      Serial.printf("%s : onWrite(), value: %s\n",
-                    pCharacteristic->getUUID().toString().c_str(),
-                    pCharacteristic->getValue().c_str());
+      std::string uuidStr = pCharacteristic->getUUID().toString();
+      size_t dataLen = pCharacteristic->getValue().length();
 
-      if (strcmp("a62eed84-7b0d-11ed-a1eb-0242ac120002", charType) != 0) {
-         Serial.printf("[BLE] Set wifi SSID: %s\n", charValue);
-         wifiSettings.bleSSID = pCharacteristic->getValue();
-      }
-      if (strcmp("090b0ef2-7b0d-11ed-a1eb-0242ac120002", charType) != 0) {
-         Serial.printf("[BLE] Set wifi PASS: %s\n", charValue);
-         wifiSettings.blePASS = pCharacteristic->getValue();
+      if (uuidStr == "10000004-0000-0000-0000-000000000001") {
+         String cmd = pCharacteristic->getValue().c_str();
+         Serial.printf("[BLE] Upload CMD: %s\n", cmd.c_str());
+         if (cmd == "START_FW") {
+            fwUpdateInProgress = true;
+            bleWriteBufferPos = 0;
+            tickerFailsave.detach();
+            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+               Update.printError(Serial);
+            } else {
+               Serial.println("[BLE] Firmware Update STARTED.");
+            }
+         } else if (cmd == "FLUSH") {
+            if (fwUpdateInProgress && bleWriteBufferPos > 0) {
+               Update.write(bleWriteBuffer, bleWriteBufferPos);
+               bleWriteBufferPos = 0;
+            }
+         } else if (cmd == "CLEAR") {
+            bleWriteBufferPos = 0;
+         } else if (cmd == "END_FW") {
+            if (fwUpdateInProgress && bleWriteBufferPos > 0) {
+               Update.write(bleWriteBuffer, bleWriteBufferPos);
+               bleWriteBufferPos = 0;
+            }
+            fwUpdateInProgress = false;
+            if (Update.end(true)) {
+               Serial.println("[BLE] Firmware Update SUCCESS. Rebooting...");
+               delay(500);
+               ESP.restart();
+            } else {
+               Update.printError(Serial);
+               Serial.println("[BLE] Firmware Update FAILED.");
+            }
+         }
+      } else if (uuidStr == "10000003-0000-0000-0000-000000000001") {
+         const uint8_t* pData = pCharacteristic->getValue().data();
+         if (fwUpdateInProgress && pData && dataLen > 4) {
+            uint32_t packetCrc = pData[0] | (pData[1] << 8) | (pData[2] << 16) | (pData[3] << 24);
+            size_t actualDataLen = dataLen - 4;
+            uint32_t calculatedCrc = calcCRC32(pData + 4, actualDataLen);
+
+            if (packetCrc == calculatedCrc) {
+               if (bleWriteBufferPos + actualDataLen <= BLE_BUFFER_SIZE) {
+                  memcpy(bleWriteBuffer + bleWriteBufferPos, pData + 4, actualDataLen);
+                  bleWriteBufferPos += actualDataLen;
+               } else {
+                  Serial.println("[BLE] ERROR: RAM buffer overflow!");
+               }
+            } else {
+               Serial.printf("[BLE] CRC Error!\n");
+            }
+         }
+      } else {
+         char charType[128];
+         char charValue[128];
+         sprintf(charType, "%s", pCharacteristic->getUUID().toString().c_str());
+         sprintf(charValue, "%s", pCharacteristic->getValue().c_str());
+         Serial.printf("%s : onWrite(), value: %s\n",
+                       pCharacteristic->getUUID().toString().c_str(),
+                       pCharacteristic->getValue().c_str());
+
+         if (strcmp("a62eed84-7b0d-11ed-a1eb-0242ac120002", charType) != 0) {
+            Serial.printf("[BLE] Set wifi SSID: %s\n", charValue);
+            wifiSettings.bleSSID = pCharacteristic->getValue();
+         }
+         if (strcmp("090b0ef2-7b0d-11ed-a1eb-0242ac120002", charType) != 0) {
+            Serial.printf("[BLE] Set wifi PASS: %s\n", charValue);
+            wifiSettings.blePASS = pCharacteristic->getValue();
+         }
       }
    };
 
@@ -986,10 +1065,18 @@ bool BleInit(String deviceId, bool enable) {
    wifiConnectedCharacteristic->setValue(wifiSettings.wifiIsConnected);
    wifiScanCharacteristic->setValue(wifiSsidScan);
 
+   NimBLEService* epaperSettingsService = pServer->createService("10000000-0000-0000-0000-000000000001");
+   NimBLECharacteristic* uploadDataCharacteristic = epaperSettingsService->createCharacteristic("10000003-0000-0000-0000-000000000001", NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+   NimBLECharacteristic* uploadCmdCharacteristic = epaperSettingsService->createCharacteristic("10000004-0000-0000-0000-000000000001", NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ);
+
+   uploadDataCharacteristic->setCallbacks(&chrCallbacks);
+   uploadCmdCharacteristic->setCallbacks(&chrCallbacks);
+
    pAdvertising = NimBLEDevice::getAdvertising();
    pAdvertising->setName(deviceId.c_str());
    pAdvertising->addServiceUUID(wifiDataService->getUUID());
    pAdvertising->addServiceUUID(deviceDataService->getUUID());
+   pAdvertising->addServiceUUID(epaperSettingsService->getUUID());
    pAdvertising->enableScanResponse(true);
    pAdvertising->start();
 
@@ -1918,7 +2005,11 @@ void debugCheck() {
 
    bool success = downloadBMPToFlash(ENV_SLEEP_SCREEN_URL_13, "cover.bmp");
    if (success) {
-      displaySetDownloadSleep();
+#ifdef EPD_TYPE_13INCH
+      displaySetDownloadSleep_13();
+#else
+      displayDebugInfo();  // TODO: Implement sleep download screen for paper 7
+#endif
    } else {
       displayDebugInfo();
    }
@@ -2341,33 +2432,9 @@ void test() {
    // displayPartialTest(false);
    bool quickref = true;
    int zufallszahl = random(2, 16);
-
-   wifiSmart();
-
-   // 1. Download image
-   getImageUrl(false);
-   loadImageFromWeb(DL_URL, "aws.bmp");
-   setImageFromFS("aws.bmp");
-
-   // 2. Stream to controller RAM but DO NOT refresh
-   delay(10000);
-   downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/test_13.bmp", "test.bmp");
-   setImageFromFS("test.bmp");
-   while (true) {};
-
    /*
-      displaySetQuickRefresh(true, 1500, 500);
-      displayWipe(true);
-      displaySetBlankTest(zufallszahl, true);
-      delay(10000);
-      setImageFromFS("cover.bmp");
-      // displayWipe(false, false, 3);
-      // displaySetText("test", false, quickref);
-      // displayPartialTest(false);
-
-      while (true) {};*/
-   displayOtaScreen();
-   delay(2000);
+      displayOtaScreen();
+      delay(2000);
    displaySetText("test", false, quickref);
    delay(2000);
    displayNoPicture();
@@ -2377,11 +2444,34 @@ void test() {
    displayTurnOn();
    delay(2000);
    displayWifiActivate(true);
+
    delay(2000);
    displaySetText("test black", true, quickref);
    delay(2000);
    displaySetBlankTest(zufallszahl, true);
    setImageFromFS("cover.bmp");
+
+   while (true) {
+      float temperature = temperatureRead();
+      Serial.printf("Temp onBoard = %.2f °C\n", temperature);
+      // bool testCharge = chargeMode(false);
+      systemData.vddValue = readVDD(false);
+      Serial.printf("VDD: %d mV\n", systemData.vddValue);
+      delay(5000);
+   };*/
+
+   wifiSmart();
+
+   // 1. Download image
+   getImageUrl(false);
+   loadImageFromWeb(DL_URL, "aws.bmp");
+   setImageFromFS("aws.bmp");
+
+   // 2. Stream to controller RAM but DO NOT refresh
+   // delay(10000);
+   // downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/test_7.bmp", "test.bmp");
+   // setImageFromFS("test.bmp");
+
    // displayWipe(false);
    //  displaySetBlankTest(2, true);
    //  setImageFromFS("tmp.gz");

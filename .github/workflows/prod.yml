@@ -23,15 +23,16 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Cache PlatformIO
-        id: cache-pio
-        uses: actions/cache@v4
+      - name: Restore PlatformIO Cache
+        id: cache-pio-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.platformio
             .pio
-          key: ${{ runner.os }}-pio-${{ hashFiles('deploy/platformio.ini') }}
+          key: ${{ runner.os }}-pio-${{ hashFiles('deploy/platformio.ini') }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-pio-${{ hashFiles('deploy/platformio.ini') }}-
             ${{ runner.os }}-pio-
 
       - name: Install PlatformIO
@@ -71,17 +72,27 @@ jobs:
           cp ./deploy/platformio.ini ./platformio.ini
 
       - name: Install PlatformIO Dependencies
-        if: steps.cache-pio.outputs.cache-hit != 'true'
         run: pio pkg install
 
       - name: Run PlatformIO Build
+        id: build
         run: |
           if ! pio run; then
             echo "::warning::Build with cache failed. Retrying clean build..."
             rm -rf .pio
             pio pkg install
             pio run
+            echo "rebuild=true" >> $GITHUB_OUTPUT
           fi
+
+      - name: Save PlatformIO Cache
+        if: steps.cache-pio-restore.outputs.cache-matched-key == '' || steps.build.outputs.rebuild == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: ${{ runner.os }}-pio-${{ hashFiles('deploy/platformio.ini') }}-${{ github.run_id }}
 
       - name: Verify and Prepare Artifacts
         run: |
