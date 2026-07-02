@@ -4,6 +4,7 @@ run-name: "3.0.${{ github.run_number }}"
 env:
   FW_VERSION: "3.0.${{ github.run_number }}"
   FW_VERSION_DEVICE: "3.0.${{ github.run_number }}"
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 on:
   push:
@@ -13,19 +14,26 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - epd_type: 13INCH
+            suffix: epd13
+          - epd_type: 7INCH
+            suffix: epd7
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.x'
 
       - name: Restore PlatformIO Cache
         id: cache-pio-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.platformio
@@ -56,6 +64,15 @@ jobs:
         run: |
           newversion="${{ env.FW_VERSION_DEVICE }}"
           
+          # Set EPD Type
+          if [ "${{ matrix.epd_type }}" == "13INCH" ]; then
+            sed -i 's/\/\/ #define EPD_TYPE_13INCH/#define EPD_TYPE_13INCH/g' src/types.h
+            sed -i 's/#define EPD_TYPE_7INCH/\/\/ #define EPD_TYPE_7INCH/g' src/types.h
+          else
+            sed -i 's/#define EPD_TYPE_13INCH/\/\/ #define EPD_TYPE_13INCH/g' src/types.h
+            sed -i 's/\/\/ #define EPD_TYPE_7INCH/#define EPD_TYPE_7INCH/g' src/types.h
+          fi
+          
           # Replace version in types.h
           sed -i -e "s/0\.0\.0/$newversion/g" src/types.h
           
@@ -65,10 +82,6 @@ jobs:
           # Remove test() call from main.cpp
           sed -i '/test();.*please remove/d' src/main.cpp
           
-          # Replace FOTA JSON content
-          sed -i -e "s/X.X.X/$newversion/g" deploy/espfota.json
-          sed -i -e "s|http://sample.de/firmware.bin|http://${{ secrets.S3_BUCKET_NAME }}/firmware.bin|g" deploy/espfota.json
-          sed -i -e "s/firmware.bin/firmware_epd13.bin/g" deploy/espfota.json
           cp ./deploy/platformio.ini ./platformio.ini
 
       - name: Install PlatformIO Dependencies
@@ -87,7 +100,7 @@ jobs:
 
       - name: Save PlatformIO Cache
         if: steps.cache-pio-restore.outputs.cache-matched-key == '' || steps.build.outputs.rebuild == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.platformio
@@ -103,36 +116,77 @@ jobs:
           
           ls -la
           mkdir artifact
-          cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_epd13.bin
-          cp ./deploy/espfota.json ./artifact/espfota_epd13.json
+          newversion="${{ env.FW_VERSION_DEVICE }}"
+          
+          # Base files
+          cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_${{ matrix.suffix }}.bin
+          cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_${{ matrix.suffix }}_pre.bin
+          
+          # JSON files mapping
+          cat deploy/espfota.json | sed "s/X.X.X/$newversion/g" | sed "s|http://sample.de/firmware.bin|http://${{ secrets.S3_BUCKET_NAME }}/firmware_${{ matrix.suffix }}.bin|g" > ./artifact/espfota_${{ matrix.suffix }}.json
+          cat deploy/espfota.json | sed "s/X.X.X/$newversion/g" | sed "s|http://sample.de/firmware.bin|http://${{ secrets.S3_BUCKET_NAME }}/firmware_${{ matrix.suffix }}_pre.bin|g" > ./artifact/espfota_${{ matrix.suffix }}_pre.json
 
       - name: Publish Pipeline Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: epaper_fw_epd13_${{ env.FW_VERSION }}
+          name: epaper_fw_${{ matrix.suffix }}_${{ env.FW_VERSION }}
           path: artifact/
 
+  deploy_pre:
+    runs-on: ubuntu-latest
+    needs: build
+    environment: s3-upload-dev
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: all-artifacts
+
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-central-1
 
-      - name: S3 Upload Firmware and JSON
+      - name: S3 Upload Firmware and JSON (Pre)
         run: |
-          # Upload files to the root of the bucket with public-read ACL
-          aws s3 cp ./artifact/ s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive --exclude "*" --include "firmware_epd13*" --include "espfota_epd13*" --acl public-read
+          for dir in all-artifacts/*/ ; do
+            [ -d "$dir" ] || continue
+            
+            aws s3 cp "$dir" s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive --exclude "*" --include "firmware_*_pre.bin" --include "espfota_*_pre.json" --acl public-read
+            
+            # Zip needs to contain non-pre versions!
+            folder_name=$(basename "$dir")
+            cd "$dir"
+            zip -r "../../${folder_name}.zip" firmware_*.bin espfota_*.json -x "*_pre*"
+            cd ../../
+            aws s3 cp "${folder_name}.zip" s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
+          done
 
-      - name: Create Archive
+  deploy_prod:
+    runs-on: ubuntu-latest
+    needs: deploy_pre
+    environment: s3-upload
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: all-artifacts
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      - name: S3 Upload Firmware and JSON (Prod)
         run: |
-          # Create a ZIP archive of the artifacts
-          cd artifact
-          zip -r ../epaper_fw_epd13_${{ env.FW_VERSION }}.zip ./*
-          cd ..
-
-      - name: S3 Upload Archive
-        run: |
-          # Upload the ZIP archive to the root of the bucket
-          aws s3 cp epaper_fw_epd13_${{ env.FW_VERSION }}.zip s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
-
+          for dir in all-artifacts/*/ ; do
+            [ -d "$dir" ] || continue
+            
+            aws s3 cp "$dir" s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive --exclude "*" --include "firmware_*.bin" --exclude "*_pre*" --include "espfota_*.json" --acl public-read
+          done
