@@ -2432,6 +2432,16 @@ void test() {
    // displayPartialTest(false);
    bool quickref = true;
    int zufallszahl = random(2, 16);
+   // wifiSmart();
+   displaySetQuickRefresh(false);
+
+   // downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/cover.bmp", "cover.bmp", true);
+   //  setImageFromFS("test.bmp");
+   displaySetDownloadSleep_13();
+
+   while (true) {
+      delay(5000);
+   }
    /*
       displayOtaScreen();
       delay(2000);
@@ -2459,8 +2469,6 @@ void test() {
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
    };*/
-
-   wifiSmart();
 
    // 1. Download image
    getImageUrl(false);

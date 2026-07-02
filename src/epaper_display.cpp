@@ -1176,15 +1176,22 @@ void displaySetDownloadSleep_13() {
 
    int screenOffset = SCREEN_OFFSET;
    uint8_t blockSize = EPD_QR_SIZE_SMALL;
+
+   String info1 = epd_client_id;
+   String info2 = "V: " + String(SOFTWARE_VERSION);
+
    char msg[128];
    int foreGround = COLOR_BLACK;
    int backGround = COLOR_WHITE;
-   uint16_t x0 = ((EPD_HEIGHT - 30 * blockSize) / 2);
-   uint16_t y0 = 1300;
+   int tw, ta, td, th;
+   uint16_t x0 = 1004;
+   uint16_t y0 = 103;
+   int fontStartX = 991;
+   int fontStartY = 273;
+   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", epd_client_id, "&w=99");
 
    uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
    qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
-   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", epd_client_id, "&w=99");
 
    display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
    display.init(115200);
@@ -1197,11 +1204,10 @@ void displaySetDownloadSleep_13() {
 
    Serial.printf("[EPD] QR Set X:%d Y:%d\n", x0, y0);
    display.setRotation(0);
-   display.setPartialWindow(x0 - 3, y0 - 2, 100, 100);
+   display.setPartialWindow(x0, y0, 100, 100);
    display.firstPage();
    do {
-      display.fillScreen(GxEPD_WHITE);
-
+      display.fillScreen(backGround);
       u8g2_for_adafruit_gfx.setFontDirection(0);
       u8g2_for_adafruit_gfx.setForegroundColor(foreGround);
       u8g2_for_adafruit_gfx.setBackgroundColor(backGround);
@@ -1211,12 +1217,36 @@ void displaySetDownloadSleep_13() {
          // Eor each horizontal module
          for (uint8_t x = 0; x < QR.size; x++) {
             if (qrcode_getModule(&QR, x, y))
-               printQRBlock(x0 + (x * blockSize) + QR_QUIET_ZONE,
-                            y0 + (y * blockSize) + QR_QUIET_ZONE,
+               printQRBlock(x0 - 1 + (x * blockSize) + QR_QUIET_ZONE,
+                            y0 + 3 + (y * blockSize) + QR_QUIET_ZONE,
                             blockSize,
                             (qrcode_getModule(&QR, x, y)) ? foreGround : backGround);
          }
       }
+
+   } while (display.nextPage());
+
+   display.setPartialWindow(fontStartX, fontStartY - 33, 190, 150);
+
+   do {
+      display.fillScreen(GxEPD_BLUE);
+
+      u8g2_for_adafruit_gfx.setFontDirection(0);
+      u8g2_for_adafruit_gfx.setForegroundColor(backGround);
+      u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_BLUE);
+      u8g2_for_adafruit_gfx.setFontMode(1);  // use u8g2 transparent mode (this is default)
+
+      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);
+      u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_BLUE);
+      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();   // positive
+      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();  // negative; in mathematicians view
+      int16_t th = ta - td;
+
+      u8g2_for_adafruit_gfx.setCursor(fontStartX + 2, fontStartY);  // start writing at this position
+      u8g2_for_adafruit_gfx.print(epd_client_id);
+      u8g2_for_adafruit_gfx.setCursor(fontStartX + 2, fontStartY + th + (th/2));  // start writing at this position
+      u8g2_for_adafruit_gfx.print(info2.c_str());
+
    } while (display.nextPage());
 
    display.epd2.setSuspendRefresh(false);
