@@ -168,7 +168,7 @@ jobs:
   deploy_prod_epd7:
     runs-on: ubuntu-latest
     needs: deploy_pre
-    environment: s3-upload
+    environment: s3-upload-epd7
     
     steps:
       - name: Download all artifacts
@@ -193,7 +193,7 @@ jobs:
   deploy_prod_epd13:
     runs-on: ubuntu-latest
     needs: deploy_pre
-    environment: s3-upload
+    environment: s3-upload-epd13
     
     steps:
       - name: Download all artifacts
