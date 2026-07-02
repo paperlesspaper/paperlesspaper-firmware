@@ -25,7 +25,7 @@
 #include "Ticker.h"
 #include "driver/rtc_io.h"
 #include "kxtj3-1057.h"
-// #include "secrets.h"
+#include "secrets.h"
 
 #if DEBUG
 #define PRINTS(s)         \
