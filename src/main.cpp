@@ -708,6 +708,8 @@ bool wifiSmart() {
          // try to connect wifi if ble data is set
          if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
             Serial.println("[NETWORK] got all BLE, try to connect with data");
+            wifiSettings.wifiIsConnected = true;
+            wifiConnectedCharacteristic->setValue(wifiSettings.wifiIsConnected);
             WiFi.begin(wifiSettings.bleSSID.c_str(), wifiSettings.blePASS.c_str());
             WiFi.waitForConnectResult(10000);
             if (WiFi.status() == WL_CONNECTED) {
@@ -716,6 +718,8 @@ bool wifiSmart() {
             }
             WiFi.disconnect(true);
             wifiSettings.blePASS = "";
+            wifiSettings.wifiIsConnected = false;
+            wifiConnectedCharacteristic->setValue(wifiSettings.wifiIsConnected);
             // break;
          }
       }
