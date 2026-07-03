@@ -602,6 +602,7 @@ bool wifiSmart() {
 #endif
 
    if (isWifi == false && isTestMode == false && doReset == false) {
+      BleInit(CLIENT_ID, true);
       powerSupplyDisplay(true);
       wifiTimeout = 5000UL;
       updateDisplayAsync("wifiactivate");
@@ -696,8 +697,8 @@ bool wifiSmart() {
          if (wifiSettings.wifiOnboardingFailed) {
             failedCounter++;
             if (failedCounter > 10) {
-               displaySetText("Bitte die WLAN Daten überprüfen!", false);
-               return false;
+               // displaySetText("Bitte die WLAN Daten überprüfen!", false);
+               // return false;
             }
          }
          if (WiFi.status() == WL_CONNECTED) {
@@ -708,8 +709,8 @@ bool wifiSmart() {
          if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
             Serial.println("[NETWORK] got all BLE, try to connect with data");
             WiFi.begin(wifiSettings.bleSSID.c_str(), wifiSettings.blePASS.c_str());
-            WiFi.waitForConnectResult();
-            break;
+            WiFi.waitForConnectResult(10000);
+            // break;
          }
       }
       Serial.println("");
