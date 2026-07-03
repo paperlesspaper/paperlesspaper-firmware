@@ -2030,7 +2030,7 @@ void debugCheck() {
    waitDisplayComplete(false);
    displaySetQuickRefresh(false);
 
-   bool success = downloadBMPToFlash(ENV_SLEEP_SCREEN_URL_13, "cover.bmp");
+   bool success = downloadBMPToFlash(ENV_SLEEP_SCREEN_URL_13, "cover.bmp", true);
    if (success) {
 #ifdef EPD_TYPE_13INCH
       displaySetDownloadSleep_13();
