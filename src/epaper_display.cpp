@@ -173,6 +173,8 @@ void displayTypeDetect() {
    digitalWrite(CS_EPD_PIN, HIGH);
    epd_spi_bus->endTransaction();
 
+#ifdef USE_QUICK_REFRESH
+
    // Pattern Matching
    if (memcmp(reg9A, patternDKE1, 2) == 0 || memcmp(reg9A, patternDKE2, 2) == 0) {
       Serial.println("[EPD] Match Found: DKE Display");
@@ -194,6 +196,13 @@ void displayTypeDetect() {
       Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
       displaySettings.globalQuickRefreshDisable = true;
    }
+
+#else
+   Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
+   displaySettings.globalQuickRefreshDisable = true;
+   displaySettings.quickRefresh = false;
+
+#endif
 }
 
 void displaySetOverlayOption(DisplayInfoKey key, bool value) {
@@ -1244,7 +1253,7 @@ void displaySetDownloadSleep_13() {
 
       u8g2_for_adafruit_gfx.setCursor(fontStartX + 2, fontStartY);  // start writing at this position
       u8g2_for_adafruit_gfx.print(epd_client_id);
-      u8g2_for_adafruit_gfx.setCursor(fontStartX + 2, fontStartY + th + (th/2));  // start writing at this position
+      u8g2_for_adafruit_gfx.setCursor(fontStartX + 2, fontStartY + th + (th / 2));  // start writing at this position
       u8g2_for_adafruit_gfx.print(info2.c_str());
 
    } while (display.nextPage());

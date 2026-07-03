@@ -2314,6 +2314,16 @@ bool accIntSet(int sensity) {
    return true;
 }
 
+void accUpdateOrient() {
+   systemData.deviceOrientation = accInit();
+   if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
+      displaySetRotation(1);
+   } else {
+      displaySetRotation(0);
+   }
+   return;
+}
+
 void recheckAccOrient(int setOrientValue) {
    if (stopAccRecheck) return;
    int accCheck = accInit(true);
@@ -2322,7 +2332,7 @@ void recheckAccOrient(int setOrientValue) {
       systemData.deviceOrientation = accCheck;
       Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
       writeIntToFlash(systemData.deviceOrientation, 220);
-      writeIntToFlash(0, 150);  // Reset picture version after ota to init update
+      // writeIntToFlash(0, 150);  // Reset picture version after ota to init update
       if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
          displaySetRotation(1);
       } else {
@@ -2330,7 +2340,7 @@ void recheckAccOrient(int setOrientValue) {
       }
       if (isEpaperActive()) {
          deinitDisplay();
-         ESP.restart();
+         // ESP.restart();
       }
    } else {
       // if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck\n");
@@ -2459,6 +2469,22 @@ void test() {
    // displayPartialTest(false);
    bool quickref = true;
    int zufallszahl = random(2, 16);
+
+   while (true) {
+      accUpdateOrient();
+      checkOrientationInBackground(systemData.deviceOrientation, true);
+      int setSuccess = setImageFromFS("tmp.gz");
+      if (isOrientUpdate) {
+         checkOrientationInBackground(systemData.deviceOrientation, false);
+         initEpaperDisplay(SPI);
+         isOrientUpdate = false;
+      }
+   }
+
+   while (true) {
+      delay(5000);
+   }
+
    wifiSmart();
    displaySetQuickRefresh(false);
 
@@ -2502,20 +2528,6 @@ void test() {
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
    };*/
-
-   // 1. Download image
-
-   // 2. Stream to controller RAM but DO NOT refresh
-   // delay(10000);
-   // downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/test_7.bmp", "test.bmp");
-   // setImageFromFS("test.bmp");
-
-   // displayWipe(false);
-   //  displaySetBlankTest(2, true);
-   //  setImageFromFS("tmp.gz");
-   //    copyFileFromFlashToSD("tmp.gz", "testfile.gz");
-   //    setImageFromSDDirect("testfile.gz");
-   //     setImageFromFS("tmp.gz");
 
    while (true) {
       float temperature = temperatureRead();
@@ -2640,14 +2652,8 @@ void setup() {
 
    setDeviceUid();
    setDisplayData(CLIENT_ID, systemData.vddValue);
-   // TODO: maybe do a function to generally check updated mem values
+   accUpdateOrient();
 
-   systemData.deviceOrientation = accInit();
-   if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
-      displaySetRotation(1);
-   } else {
-      displaySetRotation(0);
-   }
    float temperature = temperatureRead();
    if (DEBUG_FLAG) Serial.printf("[MAIN] Temp Main: %.2f °C\n", temperature);
    if (temperature < 21.0) {
@@ -2783,7 +2789,6 @@ void setup() {
       }
    }
    powerSupplyDisplay(true);
-   checkOrientationInBackground(systemData.deviceOrientation, true);
 
    if (SPIFFS.usedBytes() > 10000) {
       Serial.println("[MEM] SPIFFS seems to full ...");
@@ -2803,7 +2808,7 @@ void setup() {
 void loop() {
    if (downloadStart) {
       if (WiFi.status() == WL_CONNECTED) {
-         int setSuccess = 0;
+         int setSuccess = -1;
          downloadStart = false;
          delay(200);
          awsConnect(false);  // Disconnect AWS to free RAM for HTTPS download!
@@ -2815,7 +2820,19 @@ void loop() {
          esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
          waitDisplayComplete(false);
          if (dlSuccess == 0) {
-            int setSuccess = setImageFromFS(fileName);
+            for (int i = 0; i < 5; i++) {
+               accUpdateOrient();
+               checkOrientationInBackground(systemData.deviceOrientation, true);
+               setSuccess = setImageFromFS(fileName);
+               checkOrientationInBackground(systemData.deviceOrientation, false);
+               if (isOrientUpdate) {
+                  setSuccess = -1;
+                  initEpaperDisplay(SPI);
+                  isOrientUpdate = false;
+               } else {
+                  break;
+               }
+            }
          }
          Serial.println("[EPD] Set Image Done");
          delay(500);
