@@ -4,15 +4,19 @@
 // ==========================================
 // DISPLAY SELECTION
 // ==========================================
- #define EPD_TYPE_13INCH
-//#define EPD_TYPE_7INCH
-//   ==========================================
+#define EPD_TYPE_13INCH
+// #define EPD_TYPE_7INCH
+//    ==========================================
 
 #define SOFTWARE_VERSION "0.0.0"
 #define DEBUG 1
 
-#ifdef EPD_TYPE_13INCH
+#define DISPLAY_SPI_SPEED 10000000
+#define QR_VERSION 3
+#define QR_QUIET_ZONE 4
+// #define USE_QUICK_REFRESH
 
+#ifdef EPD_TYPE_13INCH
 #define SLEEP_SCREEN_URL ENV_SLEEP_SCREEN_URL_13
 #else
 #define SLEEP_SCREEN_URL ENV_SLEEP_SCREEN_URL_7
@@ -95,6 +99,3 @@ struct DataLayout {
    int integer;
    char byte[4];
 };
-
-#define QR_VERSION 3
-#define QR_QUIET_ZONE 4

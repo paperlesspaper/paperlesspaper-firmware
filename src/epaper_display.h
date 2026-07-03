@@ -11,7 +11,6 @@
 #define DC_PIN 19
 #define RST_PIN 1
 
-#define DISPLAY_SPI_SPEED 20000000
 #ifdef EPD_TYPE_13INCH
 #define FONT_MAIN u8g2_font_helvB24_tf  // Font for main text
 #define FONT_BIG u8g2_font_helvB18_tf   // Font for big text
