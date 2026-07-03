@@ -2469,26 +2469,27 @@ void test() {
    // displayPartialTest(false);
    bool quickref = true;
    int zufallszahl = random(2, 16);
-
-   while (true) {
-      accUpdateOrient();
-      checkOrientationInBackground(systemData.deviceOrientation, true);
-      int setSuccess = setImageFromFS("tmp.gz");
-      if (isOrientUpdate) {
-         checkOrientationInBackground(systemData.deviceOrientation, false);
-         initEpaperDisplay(SPI);
-         isOrientUpdate = false;
+   /*
+      while (true) {
+         accUpdateOrient();
+         checkOrientationInBackground(systemData.deviceOrientation, true);
+         int setSuccess = setImageFromFS("tmp.gz");
+         if (isOrientUpdate) {
+            checkOrientationInBackground(systemData.deviceOrientation, false);
+            initEpaperDisplay(SPI);
+            isOrientUpdate = false;
+         }
       }
-   }
 
-   while (true) {
-      delay(5000);
-   }
+
+      while (true) {
+         delay(5000);
+      }*/
 
    wifiSmart();
    displaySetQuickRefresh(false);
 
-   downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/cover.bmp", "cover.bmp", true);
+   // downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/cover.bmp", "cover.bmp", true);
    displaySetDownloadSleep_13();
    while (true) {
       delay(5000);

@@ -1186,17 +1186,15 @@ void displaySetDownloadSleep_13() {
    int screenOffset = SCREEN_OFFSET;
    uint8_t blockSize = EPD_QR_SIZE_SMALL;
 
-   String info1 = epd_client_id;
-   String info2 = "V: " + String(SOFTWARE_VERSION);
-
    char msg[128];
    int foreGround = COLOR_BLACK;
    int backGround = COLOR_WHITE;
    int tw, ta, td, th;
    uint16_t x0 = 1004;
    uint16_t y0 = 103;
-   int fontStartX = 991;
-   int fontStartY = 273;
+   int fontStartX = 350;
+   int fontStartY = 30;
+
    sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", epd_client_id, "&w=99");
 
    uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
@@ -1235,26 +1233,26 @@ void displaySetDownloadSleep_13() {
 
    } while (display.nextPage());
 
-   display.setPartialWindow(fontStartX, fontStartY - 33, 190, 150);
+   display.setPartialWindow((EPD_HEIGHT - fontStartX) / 2, EPD_WIDTH - fontStartY - 8, fontStartX, fontStartY);
+
+   String info1 = "ID: " + String(epd_client_id) + " Ver: " + String(SOFTWARE_VERSION);
 
    do {
-      display.fillScreen(GxEPD_BLUE);
+      display.fillScreen(GxEPD_WHITE);
 
       u8g2_for_adafruit_gfx.setFontDirection(0);
-      u8g2_for_adafruit_gfx.setForegroundColor(backGround);
-      u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_BLUE);
+      u8g2_for_adafruit_gfx.setForegroundColor(foreGround);
+      u8g2_for_adafruit_gfx.setBackgroundColor(backGround);
       u8g2_for_adafruit_gfx.setFontMode(1);  // use u8g2 transparent mode (this is default)
 
       u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);
-      u8g2_for_adafruit_gfx.setBackgroundColor(GxEPD_BLUE);
-      int16_t ta = u8g2_for_adafruit_gfx.getFontAscent();   // positive
-      int16_t td = u8g2_for_adafruit_gfx.getFontDescent();  // negative; in mathematicians view
-      int16_t th = ta - td;
+      tw = u8g2_for_adafruit_gfx.getUTF8Width(info1.c_str());  // text box width
+      ta = u8g2_for_adafruit_gfx.getFontAscent();              // positive
+      td = u8g2_for_adafruit_gfx.getFontDescent();             // negative; in mathematicians view
+      th = ta - td;
 
-      u8g2_for_adafruit_gfx.setCursor(fontStartX + 2, fontStartY);  // start writing at this position
-      u8g2_for_adafruit_gfx.print(epd_client_id);
-      u8g2_for_adafruit_gfx.setCursor(fontStartX + 2, fontStartY + th + (th / 2));  // start writing at this position
-      u8g2_for_adafruit_gfx.print(info2.c_str());
+      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, EPD_WIDTH - th);  // start writing at this position
+      u8g2_for_adafruit_gfx.print(info1.c_str());
 
    } while (display.nextPage());
 
