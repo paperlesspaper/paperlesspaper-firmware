@@ -683,7 +683,7 @@ bool wifiSmart() {
             Serial.print(".");
          }
          delay(250);
-         if (countAttempt % (4 * 10) == 0) {
+         if (countAttempt % (4 * 10) == 0 && !isBleClientConnected) {
             // this gets triggered every 10 seconds on provisioning
             Serial.printf("[NETWORK] Provisioning attempt %d/%d \n", countAttempt, (WIFI_INIT_TIME * 4));
          }
@@ -710,6 +710,12 @@ bool wifiSmart() {
             Serial.println("[NETWORK] got all BLE, try to connect with data");
             WiFi.begin(wifiSettings.bleSSID.c_str(), wifiSettings.blePASS.c_str());
             WiFi.waitForConnectResult(10000);
+            if (WiFi.status() == WL_CONNECTED) {
+               Serial.println("[NETWORK] Wifi got IP (softAP)");
+               break;
+            }
+            WiFi.disconnect(true);
+            wifiSettings.blePASS = "";
             // break;
          }
       }
