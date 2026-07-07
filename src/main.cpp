@@ -602,7 +602,7 @@ bool wifiSmart() {
 #endif
 
    if (isWifi == false && isTestMode == false && doReset == false) {
-      BleInit(CLIENT_ID, true);
+      // BleInit(CLIENT_ID, true);
       powerSupplyDisplay(true);
       wifiTimeout = 5000UL;
       updateDisplayAsync("wifiactivate");
@@ -619,9 +619,6 @@ bool wifiSmart() {
          Serial.println("[NETWORK] Stop connect because no wifi set");
          break;
       }
-      if (waitDisplayComplete(true) && i >= 1 && isWifi == false) {
-         BleInit(CLIENT_ID, true);  // needs to wait for display, otherwise scan no results
-      }
       WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
       WiFi.waitForConnectResult(wifiTimeout);
       if (WiFi.status() == WL_CONNECTED) {
@@ -630,7 +627,8 @@ bool wifiSmart() {
       WiFi.disconnect(true);
 
       delay(1000);
-      if (!isWifi && i >= 1 && waitDisplayComplete(true)) {
+      // if (!isWifi && i >= 1 && waitDisplayComplete(true)) {
+      if (!isWifi && i >= 1) {
          BleInit(CLIENT_ID, true);
          Serial.println("[NETWORK] stop search because default wifi");  // skip the intense connect if default wifi
          break;
@@ -677,6 +675,7 @@ bool wifiSmart() {
       Serial.println("[NETWORK] wait for wifi via ble...");
       int countAttempt = 0;
       int failedCounter = 0;
+      BleInit(CLIENT_ID, true);
       while (true) {
          if (!isBleClientConnected) {
             countAttempt++;
