@@ -936,6 +936,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
             } else {
                Update.printError(Serial);
                Serial.println("[BLE] Firmware Update FAILED.");
+               bleWriteBufferPos = 0xFFFF;
             }
          }
       } else if (uuidStr == "10000003-0000-0000-0000-000000000001") {
