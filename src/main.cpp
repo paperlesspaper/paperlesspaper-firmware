@@ -2813,7 +2813,6 @@ void setup() {
       gotToDeepSleep(systemData.sleepPrediction);
    }
 
-   esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
    delay(10);
 }
 
@@ -2829,7 +2828,6 @@ void loop() {
          if (DEBUG_FLAG) setUpdateState("download_ok");  // also connects aws
          Serial.println("[DL] Done");
          WiFi.setSleep(true);
-         esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
          waitDisplayComplete(false);
          if (dlSuccess == 0) {
             for (int i = 0; i < 5; i++) {
