@@ -609,7 +609,7 @@ bool wifiSmart() {
    }
    // try to connect to current wifi
    wifiSettings.wifiRetries = 0;
-   for (int i = 0; i < 5; i++) {
+   for (int i = 0; i < 3; i++) {
       wifiSettings.wifiRetries++;
       Serial.printf("[NETWORK] connect try cont %d / %d\n", i + 1, 5);
       if (doReset && i >= 1) {
@@ -629,7 +629,9 @@ bool wifiSmart() {
       delay(1000);
       // if (!isWifi && i >= 1 && waitDisplayComplete(true)) {
       if (!isWifi && i >= 1) {
+         delay(500);
          BleInit(CLIENT_ID, true);
+         delay(500);
          Serial.println("[NETWORK] stop search because default wifi");  // skip the intense connect if default wifi
          break;
       }
@@ -1119,15 +1121,14 @@ bool BleInit(String deviceId, bool enable) {
 }
 // https://forum.arduino.cc/index.php?topic=565603.0
 int downloadAndSaveFile(String fileName, String url) {
-   bool success = 0;
+   int success = 0;
    int systemFileSize = 0;
    WiFi.setSleep(false);
+   WiFiClientSecure secureClient;
+   secureClient.setInsecure();
    HTTPClient http;
    http.setTimeout(10000);
    http.setReuse(true);
-
-   WiFiClientSecure secureClient;
-   secureClient.setInsecure();
 
    if (url.indexOf("https:") >= 0) {
       Serial.println("[DL] Download HTTPS");
@@ -1148,9 +1149,8 @@ int downloadAndSaveFile(String fileName, String url) {
             saveFile = SerialFlash.open(fileName.c_str());
             SerialFlash.remove(saveFile);
             saveFile.close();
-         } else {
-            saveFile.close();
          }
+
          Serial.printf("[FLASH] Create File Size: %d.\n", httpFileSize);
          if (SerialFlash.createErasable(fileName.c_str(), httpFileSize)) {
             saveFile = SerialFlash.open(fileName.c_str());
@@ -1174,30 +1174,73 @@ int downloadAndSaveFile(String fileName, String url) {
          Serial.println(len);
          int buff_size = 2048;
          unsigned char* buff = (unsigned char*)malloc(buff_size);
+         if (buff == nullptr) {
+            Serial.println("[DL] WARNING: Failed to allocate 2048 bytes, trying 512 bytes...");
+            buff_size = 512;
+            buff = (unsigned char*)malloc(buff_size);
+         }
+         if (buff == nullptr) {
+            Serial.println("[DL] ERROR: Failed to allocate memory for download buffer!");
+            saveFile.close();
+            http.end();
+            return -1;
+         }
 
          WiFiClient* stream = http.getStreamPtr();
-         size_t downloaded_data_size = 0;
+         int write_buffer_pos = 0;
+         unsigned long lastDataTime = millis();
+         bool dlFailed = false;
          int bytesLeft = len;
 
-         while (http.connected() && (bytesLeft > 0 || len == -1)) {
-            size_t size = stream->available();
-            if (size > 0) {
-               int c = stream->readBytes(buff, ((size > buff_size) ? buff_size : size));
-               saveFile.write(buff, c);
-               if (bytesLeft > 0) {
-                  bytesLeft -= c;
+         while ((http.connected() || stream->available() > 0) && (bytesLeft > 0 || len == -1)) {
+            int available_bytes = stream->available();
+            if (available_bytes > 0) {
+               int space_left = buff_size - write_buffer_pos;
+               int to_read = (available_bytes > space_left) ? space_left : available_bytes;
+               int c = stream->read(buff + write_buffer_pos, to_read);
+               if (c > 0) {
+                  lastDataTime = millis();
+                  write_buffer_pos += c;
+                  if (bytesLeft > 0) {
+                     bytesLeft -= c;
+                  }
+                  if (write_buffer_pos >= buff_size) {
+                     saveFile.write(buff, buff_size);
+                     write_buffer_pos = 0;
+                  }
+               } else if (c < 0) {
+                  Serial.println("[DL] Stream read error");
+                  dlFailed = true;
+                  break;
                }
-               downloaded_data_size += c;
             } else {
+               if (millis() - lastDataTime > 15000) {
+                  Serial.println("[DL] Stream read timeout");
+                  dlFailed = true;
+                  break;
+               }
                delay(1);
             }
+
             if (WiFi.status() != WL_CONNECTED) {
-               http.end();
-               saveFile.close();
-               free(buff);
-               return -4;
+               Serial.println("[DL] WiFi disconnected during download");
+               dlFailed = true;
+               break;
             }
          }
+
+         // Flush remaining buffer data
+         if (!dlFailed && write_buffer_pos > 0) {
+            saveFile.write(buff, write_buffer_pos);
+         }
+         free(buff);
+
+         if (dlFailed || WiFi.status() != WL_CONNECTED) {
+            http.end();
+            saveFile.close();
+            return -4;
+         }
+
          systemFileSize = saveFile.size();
          int dif = systemFileSize - httpFileSize;
          int maxDif = (httpFileSize / 80) * -1;
@@ -1205,9 +1248,8 @@ int downloadAndSaveFile(String fileName, String url) {
             maxDif = -5000;
          }
          Serial.printf("[FLASH] Final Size: %d (Diff:%d/%d).\n", systemFileSize, dif, maxDif);
-         free(buff);
          if (dif < maxDif) {
-            // success = -8;
+            success = -8;
          }
          saveFile.close();
       }
