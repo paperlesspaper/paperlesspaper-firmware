@@ -732,6 +732,7 @@ void displayDebugInfo() {
 
    int foreGround = COLOR_WHITE;
    int backGround = COLOR_BLACK;
+   bool fullColor = false;
 
    if (displaySettings.quickRefresh) {
 #ifdef EPD_TYPE_13INCH
@@ -744,13 +745,14 @@ void displayDebugInfo() {
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
       display.init(115200);
+      fullColor = true;
    }
 
    display.setRotation(displaySettings.rotationText);
    display.setFullWindow();
-
    display.firstPage();
    do {
+      screenOffset = SCREEN_OFFSET;
       int16_t tw = 0;
       display.fillScreen(backGround);
       display.drawRect(2, 2, EPD_HEIGHT - 4, EPD_WIDTH - 4, foreGround);
@@ -780,6 +782,11 @@ void displayDebugInfo() {
       u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) - 100 - screenOffset);  // start writing at this position
       u8g2_for_adafruit_gfx.print(info1);
 
+#ifdef EPD_TYPE_13INCH
+#else
+      screenOffset = 50;
+#endif
+
       u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);
       ta = u8g2_for_adafruit_gfx.getFontAscent();                                                           // positive
       td = u8g2_for_adafruit_gfx.getFontDescent();                                                          // negative; in mathematicians view
@@ -788,17 +795,14 @@ void displayDebugInfo() {
       u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) + 100 + screenOffset);  // start writing at this position
       u8g2_for_adafruit_gfx.print("I am sleeping...");
 
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);
-      ta = u8g2_for_adafruit_gfx.getFontAscent();                                                                    // positive
-      td = u8g2_for_adafruit_gfx.getFontDescent();                                                                   // negative; in mathematicians view
-      th = ta - td;                                                                                                  // extended font
+      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                                                     // extended font
       tw = u8g2_for_adafruit_gfx.getUTF8Width("Press the button on the back to wake me up.");                        // text box width
       u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) + 100 + th + 3 + screenOffset);  // start writing at this position
       u8g2_for_adafruit_gfx.print("Press the button on the back to wake me up.");
 
       uint16_t y0 = ((EPD_WIDTH / 2) + 150 + screenOffset + screenOffset);
       display.fillRect(x0 + 2, y0 + 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, foreGround);
-
+      // For each vertical module
       for (uint8_t y = 0; y < QR.size; y++) {
          // Eor each horizontal module
          for (uint8_t x = 0; x < QR.size; x++) {

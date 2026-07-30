@@ -2539,7 +2539,7 @@ void test() {
          delay(5000);
       }*/
 
-   displayWifiActivate(false);
+   displayDebugInfo();
    while (true) {
       delay(5000);
    }
@@ -2597,7 +2597,6 @@ void test() {
       delay(5000);
    }
 
-   displayWifiActivate(false);
    delay(10000);
    displayOtaScreen();
    delay(10000);
