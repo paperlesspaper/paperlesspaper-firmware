@@ -2539,11 +2539,7 @@ void test() {
          delay(5000);
       }*/
 
-   wifiSmart();
-   displaySetQuickRefresh(false);
-
-   // downloadBMPToFlash("https://smarthome-agentur.de/wp-content/download/cover.bmp", "cover.bmp", true);
-   displaySetDownloadSleep_13();
+   displayWifiActivate(false);
    while (true) {
       delay(5000);
    }
@@ -2881,6 +2877,11 @@ void loop() {
                   setSuccess = -1;
                   initEpaperDisplay(SPI);
                   isOrientUpdate = false;
+                  Serial.println("[MAIN] Orientation change triggered retry...");
+               } else if (setSuccess != 0) {
+                  Serial.printf("[MAIN] setImageFromFS failed with code %d. Retry %d/5...\n", setSuccess, i + 1);
+                  delay(1000);
+                  initEpaperDisplay(SPI);
                } else {
                   break;
                }
