@@ -39,23 +39,35 @@ This project is released under the GNU General Public License v3.0 (GPL-3.0). Se
     ENV_AWS_IOT_ENDPOINT="your-aws-iot-endpoint.iot.region.amazonaws.com"
     ```
 
-3.  **AWS IoT Certificates**
-    The device requires AWS IoT certificates to connect. These are stored in the SPIFFS filesystem.
+3.  **AWS IoT Certificates & SPIFFS**
+    The device requires AWS IoT certificates to connect to the cloud service. These are stored in the SPIFFS filesystem.
+    
+    > ℹ️ **Important Note on Certificates:** Device-specific AWS IoT certificates are not included in this open repository for security reasons. Certificates are **exclusively available directly via paperlesspaper Customer Support**.
     
     *   **Naming Convention**: The certificates must be named using the device's unique ID, which is `epd7-` followed by the MAC address (hex, uppercase, no colons).
         *   Example MAC: `A0:B1:C2:D3:E4:F5` -> UID: `epd7-A0B1C2D3E4F5`
         *   Private Key: `epd7-A0B1C2D3E4F5.key`
         *   Certificate: `epd7-A0B1C2D3E4F5.crt`
     
-    *   **Upload**:
+    *   **Upload via PlatformIO**:
         1.  Create a `data` folder in the project root if it doesn't exist.
         2.  Place your renamed `.key` and `.crt` files in the `data` folder.
         3.  Run the PlatformIO task: `Platform` -> `Upload Filesystem Image`.
+
+    *   **Upload via Web-UI**:
+        1.  Open the Web Flasher UI (under **Firmware Update** -> **USB-Kabel (COM-Port)**).
+        2.  Use the **"SPIFFS / Zertifikat per USB übertragen (.bin)"** button to flash a pre-packaged certificate `.bin` image obtained from Support.
 
     > **Warning**: These certificates are stored in the SPIFFS partition. If you change the partition table or erase the flash, the certificates will be lost, and the device will no longer connect to the cloud.
 
 4.  **Build and Upload Firmware**
     *   Run the PlatformIO task: `General` -> `Upload`.
+
+## 🌐 Web-UI & Tools
+
+*   **Web Serial Flashing**: Flash official/custom firmware `.bin` files or SPIFFS certificate images directly in your browser over USB-C.
+*   **Web Serial Debug Monitor**: Open a live Web Serial terminal at 115200 baud directly in the Web UI to monitor UART debug logs without external software.
+*   **Web-BLE Image Upload**: Wirelessly preview, dither (Floyd-Steinberg, Atkinson, Sierra 2, etc.), auto-optimize, and send images directly to the frame.
 
 ## Usage Limits & Cloud Connectivity
 

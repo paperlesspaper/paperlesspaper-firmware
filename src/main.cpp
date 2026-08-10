@@ -16,6 +16,9 @@
 #include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <esp32fota.h>
+#include <esp_pm.h>
+#include <esp_sleep.h>
+#include <esp_wifi.h>
 #include <rom/crc.h>
 #include <rom/rtc.h>
 
@@ -1579,10 +1582,12 @@ bool awsConnect(bool connect) {
    net.setCACert(cert);
    net.setCertificate(crtFileCons);
    net.setPrivateKey(keyFileCons);
+   net.setTimeout(15000);
 
    Serial.println("[AWS] connecting...");
 
    client.begin(HOST_ADDRESS, 8883, net);
+   client.setKeepAlive(60);
    client.onMessage(iotReceiveHandler);
    counter = 0;
    while (!client.connect(CLIENT_ID)) {
@@ -1865,7 +1870,7 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    checkOrientationInBackground(0, false);
    startupCounter(true);
    if (!settings.sleepDisabled) WiFi.disconnect(true);
-   if (motionWake) {
+   if (motionWake && !settings.sleepDisabled) {
       accIntSet(80);  // Set acc int wakeup /TODO: disable if no motion wakeup
    } else {
       accIntSet(0);
@@ -1885,12 +1890,12 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    pinMode(LED_PIN, INPUT);
    Serial.flush();
    delay(10);
-   if (!settings.sleepDisabled) setCpuFrequencyMhz(40);
+   setCpuFrequencyMhz(80);
    delay(5);
-
    pinMode(DISP_POWER, INPUT);
    if (!settings.sleepDisabled) pinMode(LED_PIN, INPUT);
-   pinMode(CS_FLASH_PIN, INPUT);
+   pinMode(CS_FLASH_PIN, OUTPUT);
+   digitalWrite(CS_FLASH_PIN, HIGH);
    pinMode(SCK_PIN, INPUT);
    pinMode(MOSI_PIN, INPUT);
    pinMode(MISO_PIN, INPUT);
@@ -1898,22 +1903,36 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    pinMode(I2C_SCL_PIN, INPUT);
    pinMode(BAT_VOLT_EN_PIN, INPUT);
    pinMode(CHG_EN_PIN, INPUT);
-   pinMode(CS_SD_PIN, INPUT);
+   pinMode(CS_SD_PIN, OUTPUT);
+   digitalWrite(CS_SD_PIN, HIGH);
+
    if (settings.sleepDisabled) {
       int versionStored = newVersionSave;
-      Serial.printf("[SLEEP] enter soft sleep\n");
+      Serial.printf("[SLEEP] enter soft sleep (stable energy optimized)\n");
+      Serial.flush();
       tickerFailsave.detach();
       awsConnect(true);
-      ledBlink(2000, true);
+      ledBlink(0, false);
+
+      // Modem Sleep & Extended Timeouts für Stabilität ohne Heap-Corruption
+      WiFi.setSleep(true);
+      esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+      net.setTimeout(15000);
+      client.setKeepAlive(60);
+
       while (true) {
-         delay(100);
+         if (!client.connected() || WiFi.status() != WL_CONNECTED) {
+            awsConnect(true);
+            WiFi.setSleep(true);
+            esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+         }
          client.loop();
          if (newVersionSave != versionStored) {
             Serial.println("[SLEEP] new version detected during soft sleep, restarting to update");
             ESP.restart();
             break;
          }
-         // TODO: add watchdog feed and also add fallback. disable timeout
+         delay(500);  // FreeRTOS vTaskDelay hält LwIP TCP-Stack & mbedTLS-Heap sicher
       }
    }
    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
@@ -1994,13 +2013,21 @@ wakeup_reason_t getWakeupReason() {
    int resetReason0 = rtc_get_reset_reason(0);
    int resetReason1 = rtc_get_reset_reason(1);
    int wakeupReason = esp_sleep_get_wakeup_cause();
+   esp_reset_reason_t espReason = esp_reset_reason();
 #if DEBUG
-   Serial.printf("[WAKE] Reset Reason 0: %d\n", resetReason0);
-   Serial.printf("[WAKE] Reset Reason 1: %d\n", resetReason1);
-   Serial.printf("[WAKE] Wake Reason: %d\n", wakeupReason);
+   Serial.printf("[WAKE] Reset Reason 0: %d, 1: %d, ESP Reason: %d, Wake Cause: %d\n", resetReason0, resetReason1, espReason, wakeupReason);
 #endif
-   if (wakeupReason == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_UNDEFINED && resetReason0 == 1 && resetReason1 == 1) {
-      Serial.printf("[WAKE] Got Button Wakeup or Power Loss Wakeup\n");
+   // Direct filtering of voltage drops (brownouts) and crashes
+   if (espReason == ESP_RST_BROWNOUT) {
+      Serial.printf("[WAKE] Brownout (voltage drop) detected - ignore as button wake\n");
+      return wakeup_reason_t::SYSTEM_RESET;
+   }
+   if (espReason == ESP_RST_PANIC || espReason == ESP_RST_INT_WDT || espReason == ESP_RST_TASK_WDT || espReason == ESP_RST_WDT || espReason == ESP_RST_SW) {
+      Serial.printf("[WAKE] Crash/Watchdog/Software reset detected - ignore as button wake\n");
+      return wakeup_reason_t::SYSTEM_RESET;
+   }
+   if (wakeupReason == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_UNDEFINED && (espReason == ESP_RST_POWERON || espReason == ESP_RST_EXT || (resetReason0 == 1 && resetReason1 == 1))) {
+      Serial.printf("[WAKE] Got Button Wakeup (POWERON/EXT Reset)\n");
       return wakeup_reason_t::BUTTON;
    }
    if (wakeupReason == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_EXT1) {
@@ -2017,17 +2044,19 @@ wakeup_reason_t getWakeupReason() {
 
 void startupCounter(int reset) {
    preferences.begin("my-app", false);
-   unsigned int counter = preferences.getUInt("counter", 0);
-   counter++;
-   if (reset || counter > 16) {
+   if (reset) {
       tickerStatupCounter.detach();
+      preferences.putUInt("counter", 0);
       StartCounter = 0;
-      counter = 0;
-      Serial.println("[MAIN] Startup Counter RESET");
+      Serial.println("[MAIN] Startup Counter RESET (NVS Flash)");
+   } else {
+      unsigned int counter = preferences.getUInt("counter", 0);
+      counter++;
+      preferences.putUInt("counter", counter);
+      StartCounter = counter;
+      Serial.printf("[MAIN] Button wake detected! NVS Counter: %d/5\n", counter);
    }
-   preferences.putUInt("counter", counter);
    preferences.end();
-   StartCounter = counter;
    return;
 }
 
