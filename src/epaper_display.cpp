@@ -299,6 +299,8 @@ int setImageFromFS_7inch(String fileName) {
    saveFile = SerialFlash.open(fileName.c_str());
    if (!saveFile) {
       Serial.println("[BMP] File missing");
+      epaperIsUpdating = false;
+
       return -1;
    }
 
@@ -326,6 +328,8 @@ int setImageFromFS_7inch(String fileName) {
 
    if (width > EPD_WIDTH || height > EPD_HEIGHT) {
       Serial.printf("[BMP] Image too wide or tall!");
+      epaperIsUpdating = false;
+
       return -1;
    }
 
@@ -338,13 +342,23 @@ int setImageFromFS_7inch(String fileName) {
    int bufferSize = width / 2;
    uint8_t* lineBuffer = (uint8_t*)malloc(bufferSize);
 
+   size_t totalBytesRead = 0;
+   unsigned long startRefresh = millis();
    display.firstPage();
    do {
       display.fillScreen(GxEPD_WHITE);
       saveFile.seek(offsetData);
 
       for (int y = 0; y < height; y++) {
-         saveFile.read(lineBuffer, bufferSize);
+         int bytesRead = saveFile.read(lineBuffer, bufferSize);
+         if (bytesRead != bufferSize) {
+            Serial.printf("[BMP] Read error at line %d\n", y);
+            free(lineBuffer);
+            saveFile.close();
+            epaperIsUpdating = false;
+            return -2;
+         }
+         totalBytesRead += bytesRead;
          for (int x = 0; x < width; x++) {
             uint8_t colorData = lineBuffer[x / 2];
             uint8_t colorNibble = (x % 2 == 0) ? (colorData >> 4) : (colorData & 0x0F);
@@ -355,8 +369,23 @@ int setImageFromFS_7inch(String fileName) {
       }
    } while (display.nextPage());
 
+   unsigned long refreshDuration = millis() - startRefresh;
    free(lineBuffer);
-   Serial.println("[EPD] End Draw...");
+   saveFile.close();
+   epaperIsUpdating = false;
+
+   size_t expectedBytes = (size_t)display.pages() * height * bufferSize;
+   if (totalBytesRead != expectedBytes) {
+      Serial.printf("[EPD] Total bytes read mismatch: read %u, expected %u\n", totalBytesRead, expectedBytes);
+      return -4;
+   }
+
+   if (refreshDuration < 10000) {
+      Serial.printf("[EPD] Drawing/Refresh took only %lu ms, expected >= 10s\n", refreshDuration);
+      return -3;
+   }
+
+   Serial.printf("[EPD] End Draw. Success! Read %u bytes, took %lu ms\n", totalBytesRead, refreshDuration);
    return 0;
 }
 
@@ -364,6 +393,7 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
    saveFile = SerialFlash.open(fileName.c_str());
    if (!saveFile) {
       Serial.println("[BMP] File missing");
+      epaperIsUpdating = false;
       return -1;
    }
 
@@ -392,6 +422,7 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
 
    if (width > EPD_WIDTH || height > EPD_HEIGHT) {
       Serial.printf("[BMP] Image too wide or tall!");
+      epaperIsUpdating = false;
       return -1;
    }
 
@@ -407,6 +438,7 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
    int linesPerChunk = physHeight / numChunks;
    int bytesPerHalfLine = physWidth / 4;
 
+   size_t totalBytesRead = 0;
    uint8_t* chunkBuffer = (uint8_t*)malloc(linesPerChunk * bytesPerHalfLine);
    if (!chunkBuffer) {
       Serial.println("[BMP] Malloc for 16 chunks failed! Trying 32 chunks...");
@@ -422,6 +454,8 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
 
          if (!chunkBuffer) {
             Serial.println("[BMP] Malloc for 64 chunks failed! Aborting.");
+            epaperIsUpdating = false;
+
             return -1;
          }
       }
@@ -451,17 +485,32 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
 
             int byteOffsetInImage = (lineInImage * 600) + (srcHalf * 300);
             saveFile.seek(offsetData + byteOffsetInImage);
-
             if (rotate180) {
                uint8_t tempLine[300];
-               saveFile.read(tempLine, bytesPerHalfLine);
+               int bytesRead = saveFile.read(tempLine, bytesPerHalfLine);
+               if (bytesRead != bytesPerHalfLine) {
+                  Serial.printf("[BMP] Read error in rotate180 at chunk %d line %d\n", chunk, i);
+                  free(chunkBuffer);
+                  saveFile.close();
+                  epaperIsUpdating = false;
+                  return -2;
+               }
+               totalBytesRead += bytesRead;
                for (int b = 0; b < bytesPerHalfLine; b++) {
                   uint8_t origByte = tempLine[bytesPerHalfLine - 1 - b];
                   // swap nibbles: left pixel becomes right pixel, right pixel becomes left pixel
                   chunkBuffer[i * bytesPerHalfLine + b] = ((origByte & 0x0F) << 4) | (origByte >> 4);
                }
             } else {
-               saveFile.read(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine);
+               int bytesRead = saveFile.read(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine);
+               if (bytesRead != bytesPerHalfLine) {
+                  Serial.printf("[BMP] Read error at chunk %d line %d\n", chunk, i);
+                  free(chunkBuffer);
+                  saveFile.close();
+                  epaperIsUpdating = false;
+                  return -2;
+               }
+               totalBytesRead += bytesRead;
             }
          }
          epd_spi_bus->endTransaction();
@@ -520,12 +569,28 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
    for (int i = 0; i < 9; i++) epd_spi_bus->transfer(0x00);
    digitalWrite(EPD_CS_S, HIGH);
 
+   unsigned long refreshDuration = 0;
    if (doRefresh) {
+      unsigned long startRefresh = millis();
       display.refresh();
+      refreshDuration = millis() - startRefresh;
    }
 
    saveFile.close();
+   epaperIsUpdating = false;
 
+   size_t expectedBytes = 2 * numChunks * linesPerChunk * bytesPerHalfLine;
+   if (totalBytesRead != expectedBytes) {
+      Serial.printf("[EPD] Total bytes read mismatch: read %u, expected %u\n", totalBytesRead, expectedBytes);
+      return -4;
+   }
+
+   if (doRefresh && refreshDuration < 10000) {
+      Serial.printf("[EPD] Refresh took only %lu ms, expected >= 10s\n", refreshDuration);
+      return -3;
+   }
+
+   Serial.printf("[EPD] End 13inch Draw. Success! Read %u bytes, refresh took %lu ms\n", totalBytesRead, refreshDuration);
    return 0;
 }
 
@@ -537,7 +602,6 @@ int setImageFromFS(String fileName, bool doRefresh) {
 #else
    return setImageFromFS_7inch(fileName);
 #endif
-   epaperIsUpdating = false;
 }
 
 void displayOverlays(DisplayType& dispObj, DisplayInfo displayData, bool invertColors, bool fullcolor) {
@@ -668,6 +732,7 @@ void displayDebugInfo() {
 
    int foreGround = COLOR_WHITE;
    int backGround = COLOR_BLACK;
+   bool fullColor = false;
 
    if (displaySettings.quickRefresh) {
 #ifdef EPD_TYPE_13INCH
@@ -680,13 +745,14 @@ void displayDebugInfo() {
    } else {
       display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
       display.init(115200);
+      fullColor = true;
    }
 
    display.setRotation(displaySettings.rotationText);
    display.setFullWindow();
-
    display.firstPage();
    do {
+      screenOffset = SCREEN_OFFSET;
       int16_t tw = 0;
       display.fillScreen(backGround);
       display.drawRect(2, 2, EPD_HEIGHT - 4, EPD_WIDTH - 4, foreGround);
@@ -716,6 +782,11 @@ void displayDebugInfo() {
       u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) - 100 - screenOffset);  // start writing at this position
       u8g2_for_adafruit_gfx.print(info1);
 
+#ifdef EPD_TYPE_13INCH
+#else
+      screenOffset = 50;
+#endif
+
       u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);
       ta = u8g2_for_adafruit_gfx.getFontAscent();                                                           // positive
       td = u8g2_for_adafruit_gfx.getFontDescent();                                                          // negative; in mathematicians view
@@ -724,17 +795,14 @@ void displayDebugInfo() {
       u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) + 100 + screenOffset);  // start writing at this position
       u8g2_for_adafruit_gfx.print("I am sleeping...");
 
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);
-      ta = u8g2_for_adafruit_gfx.getFontAscent();                                                                    // positive
-      td = u8g2_for_adafruit_gfx.getFontDescent();                                                                   // negative; in mathematicians view
-      th = ta - td;                                                                                                  // extended font
+      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                                                     // extended font
       tw = u8g2_for_adafruit_gfx.getUTF8Width("Press the button on the back to wake me up.");                        // text box width
       u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) + 100 + th + 3 + screenOffset);  // start writing at this position
       u8g2_for_adafruit_gfx.print("Press the button on the back to wake me up.");
 
       uint16_t y0 = ((EPD_WIDTH / 2) + 150 + screenOffset + screenOffset);
       display.fillRect(x0 + 2, y0 + 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, foreGround);
-
+      // For each vertical module
       for (uint8_t y = 0; y < QR.size; y++) {
          // Eor each horizontal module
          for (uint8_t x = 0; x < QR.size; x++) {
@@ -1068,7 +1136,10 @@ void displayWifiActivate(bool wifiProvisioningDone) {
          u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) - 100 - screenOffset);  // start writing at this position
          u8g2_for_adafruit_gfx.print("Gerät aktivieren");
       } else {
-         u8g2_for_adafruit_gfx.setFont(FONT_MAIN);                                                             // extended font
+         u8g2_for_adafruit_gfx.setFont(FONT_MAIN);
+         ta = u8g2_for_adafruit_gfx.getFontAscent();                                                           // positive
+         td = u8g2_for_adafruit_gfx.getFontDescent();                                                          // negative; in mathematicians view
+         th = ta - td;                                                                                         // extended font
          tw = u8g2_for_adafruit_gfx.getUTF8Width("WLAN verbinden");                                            // text box width
          u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, ((EPD_WIDTH - th) / 2) - 100 - screenOffset);  // start writing at this position
          u8g2_for_adafruit_gfx.print("WLAN verbinden");
