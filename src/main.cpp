@@ -798,7 +798,7 @@ bool wifiSmart() {
       BleInit(CLIENT_ID, false);
       return true;
    }
-   Serial.println("[NETWORK] WiFi Connect failed");
+   Serial.println("[NETWORK] WiFi Connect failed ");
    restoreSettingsToFlash(EEPROM_SETTINGS_ADR);  // restore settings that are in memory if no cloud data available
    settings.timeout = storeSleepTimeMem();
    if (getActivatedFromMem()) {
