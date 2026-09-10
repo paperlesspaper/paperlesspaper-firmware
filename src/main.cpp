@@ -21,6 +21,7 @@
 #include <esp_wifi.h>
 #include <rom/crc.h>
 #include <rom/rtc.h>
+#include <vector>
 
 #include "EEPROM.h"
 #include "SPIFFS.h"
@@ -105,6 +106,8 @@ const char* crtFileCons;
 #define LENGTH(x) (strlen(x) + 1)
 #define EEPROM_SIZE 1024
 #define EEPROM_SETTINGS_ADR 500
+#define EEPROM_CERT_COUNT_ADR 230
+#define EEPROM_CERT_CLEANED_ADR 235
 #define DEFAULT_WIFI_PW ENV_WIFI_PW_DEPLOY
 #define DEFAULT_WIFI_SSID ENV_WIFI_SSID_DEPLOY
 #define DEFAULT_SLEEP 3600
@@ -196,6 +199,7 @@ uint32_t freeHeap = 0;
 int newVersionSave = 0;
 int httpFileSize = 0;
 int StartCounter = 0;
+int initialCertCount = 0;
 
 char CLIENT_ID[20];
 char CLIENT_KEY[30];
@@ -235,6 +239,7 @@ void debugFS(void);
 bool BleInit(String deviceId, bool enable);
 bool setUpdateState(String state);
 void writeIntToFlash(int value, int startAddr);
+void checkCerts(void);
 int storeSleepTimeMem(int updateTime = 0);
 void gotToDeepSleep(int seconds, bool showScreen = true, bool motionWake = true);
 bool accIntSet(int sensity);
@@ -1605,6 +1610,61 @@ bool awsConnect(bool connect) {
    Serial.println("[AWS] CONNECTED");
    return true;
 }
+void checkCerts(void) {
+   int cleanupDone = readIntFromFlash(EEPROM_CERT_CLEANED_ADR);
+
+   if (cleanupDone != 1) {
+      File root = SPIFFS.open("/");
+      if (!root) {
+         Serial.println("[MEMORY] SPIFFS open failed!");
+         return;
+      }
+
+      char myKeyFile[64];
+      char myCrtFile[64];
+      snprintf(myKeyFile, sizeof(myKeyFile), "%s.key", CLIENT_ID);
+      snprintf(myCrtFile, sizeof(myCrtFile), "%s.crt", CLIENT_ID);
+
+      int keyCount = 0;
+      std::vector<String> foreignFiles;
+
+      File file = root.openNextFile();
+      while (file) {
+         String fileName = file.name();
+         if (fileName.startsWith("/")) {
+            fileName = fileName.substring(1);
+         }
+
+         if (fileName.endsWith(".key")) {
+            keyCount++;
+         }
+
+         if ((fileName.endsWith(".crt") || fileName.endsWith(".key")) &&
+             fileName != myCrtFile && fileName != myKeyFile) {
+            foreignFiles.push_back("/" + fileName);
+         }
+
+         file = root.openNextFile();
+      }
+      root.close();
+
+      initialCertCount = keyCount;
+
+      writeIntToFlash(initialCertCount, EEPROM_CERT_COUNT_ADR);
+      writeIntToFlash(1, EEPROM_CERT_CLEANED_ADR);
+
+      Serial.printf("[SECURITY] Found %d total key files. Saved count to EEPROM (Addr %d).\n", initialCertCount, EEPROM_CERT_COUNT_ADR);
+
+      for (size_t i = 0; i < foreignFiles.size(); i++) {
+         SPIFFS.remove(foreignFiles[i]);
+      }
+   } else {
+      initialCertCount = readIntFromFlash(EEPROM_CERT_COUNT_ADR);
+      if (DEBUG_FLAG) {
+         Serial.printf("[SECURITY] Cert cleanup already done previously. Initial cert count was: %d\n", initialCertCount);
+      }
+   }
+}
 
 bool setUpdateState(String state) {
    char TOPIC_SEND[64];
@@ -1699,7 +1759,7 @@ bool deployDevice() {
    }
 
    char TOPIC_ACTIVATE[64];
-   char payload[256];
+   char payload[384];
 
    sprintf(TOPIC_ACTIVATE, "$aws/things/%s/activateepaper", CLIENT_ID);
    // if the wifi is fresh configured, reset the activation
@@ -1727,7 +1787,7 @@ bool deployDevice() {
    int sleepTime = storeSleepTimeMem();
    int predictedSleepTime = calculateSleepDuration(sleepTime, false, true);
 
-   sprintf(payload, "{\"act\": 1,\"v\": \"%s\",\"file\": \"%d\",\"bat\": \"%d\",\"wake\": \"%d\",\"wifi\": \"%d, %d\",\"usb\": \"%d\",\"orient\": \"%d\",\"timeout\": \"%d\",\"timeoutPredict\": \"%d\"}", SOFTWARE_VERSION, oldVersion, systemData.vddValue, systemData.wakeupCause, wifiSettings.wifiRetries, wifiSettings.wifiQuality, systemData.usbConnected, systemData.deviceOrientation, sleepTime, predictedSleepTime);  // Create the payload for publishing
+   sprintf(payload, "{\"act\": 1,\"v\": \"%s\",\"file\": \"%d\",\"bat\": \"%d\",\"wake\": \"%d\",\"wifi\": \"%d, %d\",\"usb\": \"%d\",\"orient\": \"%d\",\"timeout\": \"%d\",\"timeoutPredict\": \"%d\",\"certs\": %d}", SOFTWARE_VERSION, oldVersion, systemData.vddValue, systemData.wakeupCause, wifiSettings.wifiRetries, wifiSettings.wifiQuality, systemData.usbConnected, systemData.deviceOrientation, sleepTime, predictedSleepTime, initialCertCount);  // Create the payload for publishing
    int counter = 0;
    while (counter < 7 && deviceActivated == false && deviceActivationNotStarted == false) {
       awsConnect(true);
@@ -2543,32 +2603,26 @@ void test() {
    ledBlink(0, false);
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
-   // gotToDeepSleep(86000, false, false);
    analogWrite(LED_PIN, 100);
    if (powerSupplyDisplay(true)) delay(100);
+
+   File root = SPIFFS.open("/");
+   File file = root.openNextFile();
+   int fileCount = 0;
+   while (file) {
+      fileCount++;
+      Serial.print("[MAIN] CERT FILE: ");
+      Serial.println(file.name());
+
+      file = root.openNextFile();
+   }
+   root.close();
+   file.close();
 
    // displaySetQrPartial();
    // displayPartialTest(false);
    bool quickref = true;
    int zufallszahl = random(2, 16);
-   /*
-      while (true) {
-         accUpdateOrient();
-         checkOrientationInBackground(systemData.deviceOrientation, true);
-         int setSuccess = setImageFromFS("tmp.gz");
-         if (isOrientUpdate) {
-            checkOrientationInBackground(systemData.deviceOrientation, false);
-            initEpaperDisplay(SPI);
-            isOrientUpdate = false;
-         }
-      }
-
-
-      while (true) {
-         delay(5000);
-      }*/
-
-   displayDebugInfo();
    while (true) {
       delay(5000);
    }
@@ -2648,6 +2702,7 @@ void test() {
 }
 
 void setup() {
+   setCpuFrequencyMhz(160);
    chargeMode(false);  // enable charge mode
    powerSupplyDisplay(false);
    pinMode(BAT_VOLT_EN_PIN, OUTPUT);
@@ -2730,6 +2785,7 @@ void setup() {
 
    setDeviceUid();
    setDisplayData(CLIENT_ID, systemData.vddValue);
+   checkCerts();
    accUpdateOrient();
 
    float temperature = temperatureRead();
