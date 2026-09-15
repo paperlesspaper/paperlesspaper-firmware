@@ -53,6 +53,8 @@ Dieses Dokument dient zur Nachverfolgung der Implementierungsschritte für die C
   - [x] Fragile `sed`-Ersetzungen aus beiden Workflows entfernt; Umstellung auf `pio run -e ${{ matrix.suffix }}`.
   - [x] `tools/check_firmware_size.py` nach dem Build eingefügt (prüft Binaries und Partitionen).
   - [x] Pfade zur Artefakterstellung auf `./.pio/build/${{ matrix.suffix }}/firmware.bin` angepasst.
+  - [x] Resilienz gegen HTTP 503 / 429 (automatischer Modell-Failover 3.8 -> 3.6 -> 2.0).
+  - [x] Hartes Gating: `HOCH / BLOCKIERT` stoppt den Build immer; `prod.yml` läuft im `--strict`-Modus.
 
 ---
 

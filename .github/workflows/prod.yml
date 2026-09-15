@@ -33,7 +33,7 @@ jobs:
       - name: AI Firmware Risk Analysis
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python tools/ai_risk_analysis.py
+        run: python tools/ai_risk_analysis.py --strict
 
   build:
     name: "Build ${{ matrix.suffix }}"

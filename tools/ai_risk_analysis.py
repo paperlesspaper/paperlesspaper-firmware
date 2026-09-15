@@ -8,6 +8,7 @@ Analysiert Git-Diffs auf Firmware-Sicherheitsrisiken (FOTA, Watchdog, Memory Lea
 import sys
 import os
 import re
+import time
 import subprocess
 import json
 import urllib.request
@@ -145,11 +146,12 @@ def call_gemini(diff_text, api_key):
                 text = data["candidates"][0]["content"]["parts"][0]["text"]
                 return text, model
         except urllib.error.HTTPError as e:
-            if e.code == 404:
-                # Modell in dieser API-Version nicht verfügbar -> nächstes Fallback-Modell testen
-                last_error = e
-                continue
             error_body = e.read().decode("utf-8", errors="ignore")
+            if e.code in (404, 429, 500, 502, 503, 504):
+                print(f"⚠️ Modell '{model}' meldet HTTP {e.code}. Wechsle automatisch zum nächsten Fallback-Modell...")
+                last_error = f"HTTP {e.code}: {error_body}"
+                time.sleep(1)
+                continue
             raise RuntimeError(f"Gemini API HTTP {e.code}: {error_body}")
         except Exception as e:
             last_error = e
@@ -240,9 +242,10 @@ def main():
             except Exception as e:
                 print(f"Hinweis: GitHub Step Summary konnte nicht geschrieben werden: {e}")
 
-        # Bei strengem Modus prüfen, ob hohes Risiko vorliegt
-        if args.strict and ("HOCH (HIGH)" in report or "BLOCKIERT" in report):
+        # Wenn HOCH (HIGH) oder BLOCKIERT erkannt wird, IMMER abbrechen!
+        if "HOCH (HIGH)" in report or "BLOCKIERT" in report:
             print("\n❌ Build durch KI-Risikoanalyse blockiert (HOCH / BLOCKIERT erkannt)!")
+            print("::error::Firmware AI Risk Analysis flagged HIGH risk / BLOCK!")
             sys.exit(1)
 
         sys.exit(0)
@@ -250,8 +253,11 @@ def main():
     except Exception as e:
         print(f"❌ Fehler bei der KI-Risikoanalyse: {e}")
         if args.strict:
+            print("::error::KI-Risikoanalyse fehlgeschlagen (--strict aktiv). Deployment wird abgebrochen.")
             sys.exit(1)
-        sys.exit(0)
+        else:
+            print("::warning::KI-Risikoanalyse fehlgeschlagen (im Non-Strict Modus wird der Build fortgesetzt).")
+            sys.exit(0)
 
 if __name__ == "__main__":
     main()
