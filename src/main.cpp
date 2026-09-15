@@ -1717,17 +1717,19 @@ void checkCerts(void) {
 
       writeIntToFlash(initialCertCount, EEPROM_CERT_COUNT_ADR);
       writeIntToFlash(1, EEPROM_CERT_CLEANED_ADR);
-
-      Serial.printf("[SECURITY] Found %d total key files. Saved count to EEPROM (Addr %d).\n", initialCertCount, EEPROM_CERT_COUNT_ADR);
-
+      if (DEBUG_FLAG) {
+         Serial.printf("[SECURITY] Found %d total key files. Saved count to EEPROM (Addr %d).\n", initialCertCount, EEPROM_CERT_COUNT_ADR);
+      }
       for (size_t i = 0; i < foreignFiles.size(); i++) {
-         Serial.printf("[SECURITY] Removing foreign cert file: %s\n", foreignFiles[i].c_str());
+         if (DEBUG_FLAG) {
+            Serial.printf("[SECURITY] Removing foreign cert file: %s\n", foreignFiles[i].c_str());
+         }
          SPIFFS.remove(foreignFiles[i]);
       }
    } else {
       initialCertCount = readIntFromFlash(EEPROM_CERT_COUNT_ADR);
       if (DEBUG_FLAG) {
-         Serial.printf("[SECURITY] Cert cleanup already done.");
+         Serial.printf("[SECURITY] Cert cleanup already done.\n");
       }
    }
 }
@@ -2862,7 +2864,7 @@ void setup() {
    }
 
 #if DEBUG
-   test();  //-----------------test---------please remove
+   // test();  //-----------------test---------please remove
 #endif
    tickerFailsave.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
    testModeCheck();                   // check if needs to enter deploy state
