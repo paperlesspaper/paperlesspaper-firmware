@@ -2974,9 +2974,12 @@ void setup() {
    // if (DEBUG_FLAG) isUpdate = true;  // TODO: remove in production, only for testing
    if (!isUpdate) {
       if (newVersionSave <= 0) {
-         if (powerSupplyDisplay(true)) delay(100);
-         if (DEBUG_FLAG) setUpdateState("update_checked_nopicture");
-         displayNoPicture();
+         if (readIntFromFlash(150) <= 0) {
+            if (powerSupplyDisplay(true)) delay(100);
+            if (DEBUG_FLAG) setUpdateState("update_checked_nopicture");
+            displayNoPicture();
+            writeIntToFlash(1, 150);  // set version to 1 to prevent reloads
+         }
       } else {
          if (DEBUG_FLAG) setUpdateState("update_checked_noupdate");
       }
