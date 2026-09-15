@@ -7,13 +7,38 @@ env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
 
 jobs:
-  build:
+  pre_flight:
+    name: "Pre-Flight & Risk Analysis"
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Validate Firmware Configuration
+        run: python tools/validate_firmware_config.py
+
+      - name: AI Firmware Risk Analysis
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python tools/ai_risk_analysis.py
+
+  build:
+    name: "Build ${{ matrix.suffix }}"
+    runs-on: ubuntu-latest
+    needs: pre_flight
     strategy:
       matrix:
         include:
@@ -64,15 +89,6 @@ jobs:
         run: |
           newversion="${{ env.FW_VERSION_DEVICE }}"
           
-          # Set EPD Type
-          if [ "${{ matrix.epd_type }}" == "13INCH" ]; then
-            sed -i 's/\/\/ #define EPD_TYPE_13INCH/#define EPD_TYPE_13INCH/g' src/types.h
-            sed -i 's/#define EPD_TYPE_7INCH/\/\/ #define EPD_TYPE_7INCH/g' src/types.h
-          else
-            sed -i 's/#define EPD_TYPE_13INCH/\/\/ #define EPD_TYPE_13INCH/g' src/types.h
-            sed -i 's/\/\/ #define EPD_TYPE_7INCH/#define EPD_TYPE_7INCH/g' src/types.h
-          fi
-          
           # Replace version in types.h
           sed -i -e "s/0\.0\.0/$newversion/g" src/types.h
           
@@ -90,13 +106,17 @@ jobs:
       - name: Run PlatformIO Build
         id: build
         run: |
-          if ! pio run; then
+          if ! pio run -e ${{ matrix.suffix }}; then
             echo "::warning::Build with cache failed. Retrying clean build..."
             rm -rf .pio
             pio pkg install
-            pio run
+            pio run -e ${{ matrix.suffix }}
             echo "rebuild=true" >> $GITHUB_OUTPUT
           fi
+
+      - name: Check Firmware Size and Partition Limit
+        run: |
+          python tools/check_firmware_size.py ./.pio/build/${{ matrix.suffix }}/firmware.bin --target ${{ matrix.suffix }}
 
       - name: Save PlatformIO Cache
         if: steps.cache-pio-restore.outputs.cache-matched-key == '' || steps.build.outputs.rebuild == 'true'
@@ -109,7 +129,7 @@ jobs:
 
       - name: Verify and Prepare Artifacts
         run: |
-          if [ ! -f "./.pio/build/ESP32-C6-DevKitM-1/firmware.bin" ]; then
+          if [ ! -f "./.pio/build/${{ matrix.suffix }}/firmware.bin" ]; then
             echo "::error::Build failed: firmware.bin was not created."
             exit 1
           fi
@@ -119,8 +139,8 @@ jobs:
           newversion="${{ env.FW_VERSION_DEVICE }}"
           
           # Base files
-          cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_${{ matrix.suffix }}.bin
-          cp ./.pio/build/ESP32-C6-DevKitM-1/firmware.bin ./artifact/firmware_${{ matrix.suffix }}_pre.bin
+          cp ./.pio/build/${{ matrix.suffix }}/firmware.bin ./artifact/firmware_${{ matrix.suffix }}.bin
+          cp ./.pio/build/${{ matrix.suffix }}/firmware.bin ./artifact/firmware_${{ matrix.suffix }}_pre.bin
           
           # JSON files mapping
           cat deploy/espfota.json | sed "s/X.X.X/$newversion/g" | sed "s|http://sample.de/firmware.bin|http://${{ secrets.S3_BUCKET_NAME }}/firmware_${{ matrix.suffix }}.bin|g" > ./artifact/espfota_${{ matrix.suffix }}.json
