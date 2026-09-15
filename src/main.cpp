@@ -107,7 +107,7 @@ const char* crtFileCons;
 #define EEPROM_SIZE 1024
 #define EEPROM_SETTINGS_ADR 500
 #define EEPROM_CERT_COUNT_ADR 230
-#define EEPROM_CERT_CLEANED_ADR 235
+#define EEPROM_CERT_CLEANED_ADR 240
 #define DEFAULT_WIFI_PW ENV_WIFI_PW_DEPLOY
 #define DEFAULT_WIFI_SSID ENV_WIFI_SSID_DEPLOY
 #define DEFAULT_SLEEP 3600
@@ -1558,26 +1558,58 @@ bool awsConnect(bool connect) {
    sprintf(keyFileUri, "/%s.key", CLIENT_ID);
 
    File myFile = SPIFFS.open(keyFileUri);
-   String keyString;
-   while (myFile.available()) {
-      String buffer = myFile.readStringUntil('\n');
-      keyString.concat(buffer);
-      keyString.concat("\n");
+   if (!myFile) {
+      // Fallback: check if file was uploaded with uppercase MAC
+      char altKeyUri[100];
+      String macPart = String(CLIENT_ID).substring(strlen(EPD_TYPE_IDENTIFIER));
+      macPart.toUpperCase();
+      sprintf(altKeyUri, "/%s%s.key", EPD_TYPE_IDENTIFIER, macPart.c_str());
+      myFile = SPIFFS.open(altKeyUri);
+      if (myFile) {
+         myFile.close();
+         SPIFFS.rename(altKeyUri, keyFileUri);
+         myFile = SPIFFS.open(keyFileUri);
+      }
    }
-   keyFileCons = keyString.c_str();
-   myFile.close();
+
+   String keyString;
+   if (myFile) {
+      while (myFile.available()) {
+         String buffer = myFile.readStringUntil('\n');
+         keyString.concat(buffer);
+         keyString.concat("\n");
+      }
+      keyFileCons = keyString.c_str();
+      myFile.close();
+   }
 
    char crtFileUri[100];
    sprintf(crtFileUri, "/%s.crt", CLIENT_ID);
    File myFile2 = SPIFFS.open(crtFileUri);
-   String crtString;
-   while (myFile2.available()) {
-      String buffer = myFile2.readStringUntil('\n');
-      crtString.concat(buffer);
-      crtString.concat("\n");
+   if (!myFile2) {
+      // Fallback: check if file was uploaded with uppercase MAC
+      char altCrtUri[100];
+      String macPart = String(CLIENT_ID).substring(strlen(EPD_TYPE_IDENTIFIER));
+      macPart.toUpperCase();
+      sprintf(altCrtUri, "/%s%s.crt", EPD_TYPE_IDENTIFIER, macPart.c_str());
+      myFile2 = SPIFFS.open(altCrtUri);
+      if (myFile2) {
+         myFile2.close();
+         SPIFFS.rename(altCrtUri, crtFileUri);
+         myFile2 = SPIFFS.open(crtFileUri);
+      }
    }
-   crtFileCons = crtString.c_str();
-   myFile2.close();
+
+   String crtString;
+   if (myFile2) {
+      while (myFile2.available()) {
+         String buffer = myFile2.readStringUntil('\n');
+         crtString.concat(buffer);
+         crtString.concat("\n");
+      }
+      crtFileCons = crtString.c_str();
+      myFile2.close();
+   }
 
    if (keyString.length() < 10 || crtString.length() < 10) {
       Serial.println("[AWS] Error: Certs not found");
@@ -1626,7 +1658,14 @@ void checkCerts(void) {
       snprintf(myCrtFile, sizeof(myCrtFile), "%s.crt", CLIENT_ID);
 
       int keyCount = 0;
+      bool myKeyFound = false;
+      bool myCrtFound = false;
       std::vector<String> foreignFiles;
+      struct RenameEntry {
+         String from;
+         String to;
+      };
+      std::vector<RenameEntry> filesToRename;
 
       File file = root.openNextFile();
       while (file) {
@@ -1639,14 +1678,40 @@ void checkCerts(void) {
             keyCount++;
          }
 
-         if ((fileName.endsWith(".crt") || fileName.endsWith(".key")) &&
-             fileName != myCrtFile && fileName != myKeyFile) {
-            foreignFiles.push_back("/" + fileName);
+         // Case-insensitive check for own device certificate & key
+         if (fileName.equalsIgnoreCase(myKeyFile)) {
+            myKeyFound = true;
+            if (fileName != myKeyFile) {
+               filesToRename.push_back({"/" + fileName, "/" + String(myKeyFile)});
+            }
+         } else if (fileName.equalsIgnoreCase(myCrtFile)) {
+            myCrtFound = true;
+            if (fileName != myCrtFile) {
+               filesToRename.push_back({"/" + fileName, "/" + String(myCrtFile)});
+            }
+         } else {
+            // Pattern check: only treat files starting with "epd" as foreign device certs.
+            if (fileName.startsWith("epd") && (fileName.endsWith(".crt") || fileName.endsWith(".key"))) {
+               foreignFiles.push_back("/" + fileName);
+            }
          }
 
          file = root.openNextFile();
       }
       root.close();
+
+      if (!myKeyFound || !myCrtFound) {
+         Serial.printf("[SECURITY] Safety abort: Own certs not verified (key: %s, crt: %s). aborted to prevent data loss.\n",
+                       myKeyFound ? "found" : "MISSING",
+                       myCrtFound ? "found" : "MISSING");
+         return;
+      }
+
+      for (size_t i = 0; i < filesToRename.size(); i++) {
+         Serial.printf("[SECURITY] Normalizing cert filename casing: %s -> %s\n",
+                       filesToRename[i].from.c_str(), filesToRename[i].to.c_str());
+         SPIFFS.rename(filesToRename[i].from, filesToRename[i].to);
+      }
 
       initialCertCount = keyCount;
 
@@ -1656,12 +1721,13 @@ void checkCerts(void) {
       Serial.printf("[SECURITY] Found %d total key files. Saved count to EEPROM (Addr %d).\n", initialCertCount, EEPROM_CERT_COUNT_ADR);
 
       for (size_t i = 0; i < foreignFiles.size(); i++) {
+         Serial.printf("[SECURITY] Removing foreign cert file: %s\n", foreignFiles[i].c_str());
          SPIFFS.remove(foreignFiles[i]);
       }
    } else {
       initialCertCount = readIntFromFlash(EEPROM_CERT_COUNT_ADR);
       if (DEBUG_FLAG) {
-         Serial.printf("[SECURITY] Cert cleanup already done previously. Initial cert count was: %d\n", initialCertCount);
+         Serial.printf("[SECURITY] Cert cleanup already done.");
       }
    }
 }
@@ -2796,7 +2862,7 @@ void setup() {
    }
 
 #if DEBUG
-   // test();  //-----------------test---------please remove
+   test();  //-----------------test---------please remove
 #endif
    tickerFailsave.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
    testModeCheck();                   // check if needs to enter deploy state
