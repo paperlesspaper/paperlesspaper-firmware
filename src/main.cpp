@@ -314,7 +314,6 @@ void iotReceiveHandler(String& topic, String& payload) {
       size_t otaUrlLength = strlen(otaUrlTemp);
       Serial.printf("[AWS RX] OTA URL received: '%s' (%d) \n", otaUrlTemp, otaUrlLength);
       if (otaUrlLength > 5) {
-         myEsp32FOTA.setManifestURL(otaUrlTemp);
          displaySetQuickRefresh(true);
          waitDisplayComplete(false);
          delay(200);
@@ -323,7 +322,15 @@ void iotReceiveHandler(String& topic, String& payload) {
          Serial.println("[OTA] OTA via MQTT Started.....");
          writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
          resetAll(false, false);
-         myEsp32FOTA.execOTA();
+
+         if (strstr(otaUrlTemp, ".json") != nullptr) {
+            Serial.println("[OTA] Processing Manifest JSON...");
+            myEsp32FOTA.setManifestURL(otaUrlTemp);
+            myEsp32FOTA.forceUpdate(false);
+         } else {
+            Serial.println("[OTA] Processing direct binary URL...");
+            myEsp32FOTA.forceUpdate(otaUrlTemp, false);
+         }
          delay(2000);
       }
    }
