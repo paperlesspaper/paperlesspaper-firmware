@@ -163,19 +163,20 @@ Die HIL-Testsuite ist vollständig in die kontinuierliche Build- & Deployment-Pi
                                  |
                                  v
   +-------------------------------------------------------------+
-  | 3. S3 Deployment (Upload nach dev-Bucket & Manifests)       |
-  +-------------------------------------------------------------+
-                                 |
-                                 v
-  +-------------------------------------------------------------+
-  | 4. HIL Test: EPD7 (7.5" Hardware)                           |
+  | 3. HIL Test: EPD7 (7.5" Hardware)                           |
   |    (Sequentiell auf Windows Runner, generiert junit_epd7)   |
   +-------------------------------------------------------------+
                                  |
                                  v  (needs: hil_test_epd7)
   +-------------------------------------------------------------+
-  | 5. HIL Test: EPD13 (13.3" Hardware)                         |
+  | 4. HIL Test: EPD13 (13.3" Hardware)                         |
   |    (Streng nacheinander, verhindert Relay-/BLE-Kollision)   |
+  +-------------------------------------------------------------+
+                                 |
+                                 v  (needs: [build, hil_test_epd7, hil_test_epd13])
+  +-------------------------------------------------------------+
+  | 5. S3 Deployment (Upload nach dev-Bucket & Manifests)       |
+  |    (GATING: Wird NUR ausgeführt, wenn alle Tests bestehen!) |
   +-------------------------------------------------------------+
                                  |
                                  v  (if: always())
@@ -188,8 +189,10 @@ Die HIL-Testsuite ist vollständig in die kontinuierliche Build- & Deployment-Pi
   +-------------------------------------------------------------+
 ```
 
-### Strenge Abbruch-Kriterien
-1. **Kein gleichzeitiger Hardware-Zugriff:** EPD7 und EPD13 laufen **immer sequentiell** (Job `hil_test_epd13` wartet auf erfolgreichen Abschluss von `hil_test_epd7`), um COM-Port-, Relais- und BLE-Kollisionen auf dem Host auszuschließen.
-2. **Strikter Abbruch:** Schlägt das Deployment, einer der Hardware-Tests oder die KI-Risikobewertung (`HOCH` / `BLOCKIERT`) fehl, bricht die Pipeline mit Exit-Code 1 ab.
-3. **Automatischer Pull Request:** Das generierte JSON-Artefakt (`hil_test_protocol.json`) liefert `overall_success: true/false`, Kennzahlen und Einzeltestergebnisse für automatische Freigabe- und Mergebots.
+### Strenge Qualitäts- & Sicherheits-Garantien
+1. **Deployment-Gating durch echte Hardware:** Das S3-Deployment (`deploy`) läuft **erst nach** erfolgreicher Hardware-Verifikation. Schlägt ein HIL-Test fehl, wird die Firmware gar nicht erst in den S3-Bucket hochgeladen, sodass niemals fehlerhafte Software an Test- oder Produktivgeräte verteilt wird.
+2. **Kein vorheriges Deployment nötig:** Der HIL-Test benötigt kein vorheriges Deployment, da er die frisch kompilierten Binärdateien direkt aus den GitHub Actions Build-Artefakten bezieht und für das Test-OTA eine isolierte, temporäre S3-Testdatei (`test-firmware-<target>.bin`) nutzt, die direkt nach dem Test gelöscht wird.
+3. **Kein gleichzeitiger Hardware-Zugriff:** EPD7 und EPD13 laufen **immer sequentiell** (Job `hil_test_epd13` wartet auf `hil_test_epd7`), um COM-Port-, Relais- und BLE-Kollisionen auf dem Host auszuschließen.
+4. **Strikter Abbruch:** Schlägt die Risikoanalyse, der Build, ein Hardware-Test oder das Deployment fehl, bricht die Pipeline mit Exit-Code 1 ab.
+5. **Automatischer Pull Request:** Das generierte JSON-Artefakt (`hil_test_protocol.json`) liefert `overall_success: true/false`, Kennzahlen und Einzeltestergebnisse für automatische Freigabe- und Mergebots.
 

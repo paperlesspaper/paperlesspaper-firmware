@@ -184,7 +184,12 @@ def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_da
     lines.append("| :--- | :---: | :--- |")
 
     # Deployment
-    deploy_icon = "✅ Erfolgreich" if deploy_passed else "❌ Fehlgeschlagen"
+    if deploy_status == "skipped":
+        deploy_icon = "⚪ Übersprungen (Hardware-Tests nicht bestanden)"
+    elif deploy_passed:
+        deploy_icon = "✅ Erfolgreich"
+    else:
+        deploy_icon = "❌ Fehlgeschlagen"
     lines.append(f"| **S3 Deployment (`dev`)** | {deploy_icon} | Upload von Firmware & JSON Manifests |")
 
     # EPD7

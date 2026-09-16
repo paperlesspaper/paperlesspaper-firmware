@@ -157,44 +157,10 @@ jobs:
           name: epaper_fw_${{ matrix.suffix }}_dev_${{ env.FW_VERSION }}
           path: artifact/
 
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    environment: s3-upload-dev
-    
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: all-artifacts
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: eu-central-1
-
-      - name: S3 Upload Firmware and JSON
-        run: |
-          # Iteriere über alle heruntergeladenen Artefakte
-          for dir in all-artifacts/*/ ; do
-            # Falls das Verzeichnis leer ist (sollte nicht passieren) überspringen
-            [ -d "$dir" ] || continue
-            
-            aws s3 cp "$dir" s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive --exclude "*" --include "firmware_*_dev*" --include "espfota_*_dev*" --acl public-read
-            
-            folder_name=$(basename "$dir")
-            cd "$dir"
-            zip -r "../../${folder_name}.zip" ./*
-            cd ../../
-            aws s3 cp "${folder_name}.zip" s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
-          done
-
   hil_test_epd7:
     name: "HIL Test: EPD7 (7.5\" Hardware)"
     runs-on: [self-hosted, Windows, hil-testbench]
-    needs: deploy
+    needs: build
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -281,6 +247,42 @@ jobs:
           path: junit_epd13.xml
           if-no-files-found: ignore
 
+  deploy:
+    name: "S3 Deployment (dev)"
+    runs-on: ubuntu-latest
+    needs: [build, hil_test_epd7, hil_test_epd13]
+    if: needs.build.result == 'success' && needs.hil_test_epd7.result == 'success' && (needs.hil_test_epd13.result == 'success' || needs.hil_test_epd13.result == 'skipped')
+    environment: s3-upload-dev
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: all-artifacts
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      - name: S3 Upload Firmware and JSON
+        run: |
+          # Iteriere über alle heruntergeladenen Artefakte
+          for dir in all-artifacts/*/ ; do
+            # Falls das Verzeichnis leer ist (sollte nicht passieren) überspringen
+            [ -d "$dir" ] || continue
+            
+            aws s3 cp "$dir" s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive --exclude "*" --include "firmware_*_dev*" --include "espfota_*_dev*" --acl public-read
+            
+            folder_name=$(basename "$dir")
+            cd "$dir"
+            zip -r "../../${folder_name}.zip" ./*
+            cd ../../
+            aws s3 cp "${folder_name}.zip" s3://${{ secrets.S3_BUCKET_NAME }}/ --acl public-read
+          done
+
   report:
     name: "Testprotokoll & Release-Bewertung"
     runs-on: ubuntu-latest
@@ -351,9 +353,9 @@ jobs:
           echo "Prüfe Gesamtstatus aller Pipeline-Jobs..."
           echo "Pre-Flight Status:   ${{ needs.pre_flight.result }}"
           echo "Build Status:        ${{ needs.build.result }}"
-          echo "Deploy Status:       ${{ needs.deploy.result }}"
           echo "EPD7 Test Status:    ${{ needs.hil_test_epd7.result }}"
           echo "EPD13 Test Status:   ${{ needs.hil_test_epd13.result }}"
+          echo "Deploy Status:       ${{ needs.deploy.result }}"
 
           if [ "${{ needs.pre_flight.result }}" != "success" ]; then
             echo "::error::Pre-Flight Prüfung oder Risikoanalyse fehlgeschlagen! Pipeline wird abgebrochen."
@@ -365,11 +367,6 @@ jobs:
             exit 1
           fi
           
-          if [ "${{ needs.deploy.result }}" != "success" ]; then
-            echo "::error::Deployment fehlgeschlagen oder abgebrochen! Pipeline wird beendet."
-            exit 1
-          fi
-          
           if [ "${{ needs.hil_test_epd7.result }}" != "success" ]; then
             echo "::error::HIL Test für EPD7 fehlgeschlagen oder abgebrochen! Pipeline wird beendet."
             exit 1
@@ -377,6 +374,11 @@ jobs:
           
           if [ "${{ needs.hil_test_epd13.result }}" != "success" ] && [ "${{ needs.hil_test_epd13.result }}" != "skipped" ]; then
             echo "::error::HIL Test für EPD13 fehlgeschlagen! Pipeline wird beendet."
+            exit 1
+          fi
+
+          if [ "${{ needs.deploy.result }}" != "success" ]; then
+            echo "::error::Deployment fehlgeschlagen oder übersprungen (Hardware-Tests nicht bestanden)! Pipeline wird beendet."
             exit 1
           fi
 

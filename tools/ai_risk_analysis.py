@@ -124,7 +124,7 @@ def call_gemini(diff_text, api_key):
 
     # Bevorzugtes Modell: gemini-3.8-flash, gefolgt von erprobten Fallbacks
     models_to_try = [os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")]
-    for fallback in ["gemini-3.6-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    for fallback in ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest"]:
         if fallback not in models_to_try:
             models_to_try.append(fallback)
 
@@ -147,7 +147,12 @@ def call_gemini(diff_text, api_key):
                 return text, model
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="ignore")
-            if e.code in (404, 429, 500, 502, 503, 504):
+            if e.code == 429:
+                print(f"⚠️ Modell '{model}' meldet HTTP 429 (Quota/Prepayment Credits erschöpft).")
+                last_error = f"HTTP 429 (Quota/Credits erschöpft): {error_body}"
+                time.sleep(1)
+                continue
+            elif e.code in (404, 500, 502, 503, 504):
                 print(f"⚠️ Modell '{model}' meldet HTTP {e.code}. Wechsle automatisch zum nächsten Fallback-Modell...")
                 last_error = f"HTTP {e.code}: {error_body}"
                 time.sleep(1)
@@ -252,12 +257,8 @@ def main():
 
     except Exception as e:
         print(f"❌ Fehler bei der KI-Risikoanalyse: {e}")
-        if args.strict:
-            print("::error::KI-Risikoanalyse fehlgeschlagen (--strict aktiv). Deployment wird abgebrochen.")
-            sys.exit(1)
-        else:
-            print("::warning::KI-Risikoanalyse fehlgeschlagen (im Non-Strict Modus wird der Build fortgesetzt).")
-            sys.exit(0)
+        print("::error::KI-Risikoanalyse fehlgeschlagen! Pipeline wird abgebrochen.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
