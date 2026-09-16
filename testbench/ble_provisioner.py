@@ -109,7 +109,7 @@ class BLEProvisioner:
             )
 
         print(f"🔗 [BLE] Verbinde mit {device.name} ({device.address})...")
-        async with BleakClient(device) as client:
+        async with BleakClient(device, timeout=25.0) as client:
             if not client.is_connected:
                 raise BLEProvisioningError(f"Konnte keine BLE-Verbindung zu {device.name} aufbauen.")
 
@@ -162,7 +162,7 @@ class BLEProvisioner:
         if not device:
             raise BLEProvisioningError(f"Gerät '{device_name_or_uid}' nicht gefunden.")
 
-        async with BleakClient(device) as client:
+        async with BleakClient(device, timeout=25.0) as client:
             raw = await client.read_gatt_char(config.BLE_CHAR_WIFI_SCAN)
             text = raw.decode("utf-8", errors="replace")
             # Format im Code: SSID´RSSI´´SSID´RSSI´´...

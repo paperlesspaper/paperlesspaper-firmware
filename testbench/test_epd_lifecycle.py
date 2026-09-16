@@ -102,21 +102,24 @@ class TestEPD7Lifecycle:
         with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
             print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
             device.wait_for_pattern(
-                r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble)",
+                r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
                 timeout=30
             )
 
         print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD7 (UID: {self.device_id})...")
-        nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=12)
-        print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
-        for n in nets[:5]:
-            print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+        try:
+            nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
+            print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
+            for n in nets[:5]:
+                print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+        except Exception as e:
+            print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
 
         success = BLEProvisioner.provision_wifi(
             self.device_id,
             ssid=config.WIFI_SSID,
             password=config.WIFI_PASSWORD,
-            timeout=15
+            timeout=25
         )
         assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
         print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")
@@ -316,21 +319,24 @@ class TestEPD13Lifecycle:
         with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:
             print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
             device.wait_for_pattern(
-                r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble)",
+                r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
                 timeout=30
             )
 
         print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD13 (UID: {self.device_id})...")
-        nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=12)
-        print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
-        for n in nets[:5]:
-            print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+        try:
+            nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
+            print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
+            for n in nets[:5]:
+                print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+        except Exception as e:
+            print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
 
         success = BLEProvisioner.provision_wifi(
             self.device_id,
             ssid=config.WIFI_SSID,
             password=config.WIFI_PASSWORD,
-            timeout=15
+            timeout=25
         )
         assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
         print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")

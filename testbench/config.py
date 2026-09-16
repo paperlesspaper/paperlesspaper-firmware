@@ -104,8 +104,29 @@ DEEP_SLEEP_TIMEOUT = int(os.environ.get("HIL_SLEEP_TIMEOUT", "20"))
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CACHE_DIR = os.path.join(WORKSPACE_ROOT, "testbench", "cache")
 
-PRODUCTION_MANIFEST_URL_EPD7 = os.environ.get("PRODUCTION_MANIFEST_URL_EPD7", os.environ.get("ENV_OTA_URL", ""))
-PRODUCTION_MANIFEST_URL_EPD13 = os.environ.get("PRODUCTION_MANIFEST_URL_EPD13", os.environ.get("ENV_OTA_URL_13", ""))
+# S3 Bucket für OTA Firmware-Distribution & Sicherheits-Blacklist für Produktivdateien
+def _detect_ota_bucket():
+    bucket = os.environ.get("HIL_OTA_BUCKET") or os.environ.get("HIL_S3_BUCKET")
+    if not bucket and os.environ.get("PRODUCTION_MANIFEST_URL_EPD7"):
+        try:
+            from urllib.parse import urlparse
+            bucket = urlparse(os.environ.get("PRODUCTION_MANIFEST_URL_EPD7")).netloc
+        except Exception:
+            pass
+    return bucket or "ul.epaperframe.de"
+
+HIL_OTA_BUCKET = _detect_ota_bucket()
+
+def _detect_prod_manifest(target):
+    env_key = "PRODUCTION_MANIFEST_URL_EPD7" if target == "epd7" else "PRODUCTION_MANIFEST_URL_EPD13"
+    legacy_key = "ENV_OTA_URL" if target == "epd7" else "ENV_OTA_URL_13"
+    url = os.environ.get(env_key) or os.environ.get(legacy_key)
+    if not url and HIL_OTA_BUCKET:
+        url = f"http://{HIL_OTA_BUCKET}/espfota_{target}.json"
+    return url or ""
+
+PRODUCTION_MANIFEST_URL_EPD7 = _detect_prod_manifest("epd7")
+PRODUCTION_MANIFEST_URL_EPD13 = _detect_prod_manifest("epd13")
 CANDIDATE_MANIFEST_URL_EPD7 = os.environ.get("CANDIDATE_MANIFEST_URL_EPD7", os.environ.get("ENV_OTA_URL_DEV", ""))
 CANDIDATE_MANIFEST_URL_EPD13 = os.environ.get("CANDIDATE_MANIFEST_URL_EPD13", os.environ.get("ENV_OTA_URL_DEV_13", ""))
 
@@ -120,19 +141,6 @@ DEFAULT_CANDIDATE_EPD13 = os.environ.get(
     "CANDIDATE_FIRMWARE_EPD13",
     os.path.join(WORKSPACE_ROOT, ".pio", "build", "epd13", "firmware.bin")
 )
-
-# S3 Bucket für OTA Firmware-Distribution & Sicherheits-Blacklist für Produktivdateien
-def _detect_ota_bucket():
-    bucket = os.environ.get("HIL_OTA_BUCKET") or os.environ.get("HIL_S3_BUCKET")
-    if not bucket and PRODUCTION_MANIFEST_URL_EPD7:
-        try:
-            from urllib.parse import urlparse
-            bucket = urlparse(PRODUCTION_MANIFEST_URL_EPD7).netloc
-        except Exception:
-            pass
-    return bucket or ""
-
-HIL_OTA_BUCKET = _detect_ota_bucket()
 PROTECTED_S3_KEYS = frozenset([
     "firmware.bin", "firmware_dev.bin", "firmware_v2.bin",
     "firmware_epd7.bin", "firmware_epd7_dev.bin", "firmware_epd7_pre.bin",
