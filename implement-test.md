@@ -87,16 +87,18 @@ Dieses Dokument dient zur Nachverfolgung der Implementierungsschritte für die C
 ### Phase 3: Canary-Auswahl & DynamoDB Health Gate
 *Ziel: Gezielte Zuweisung an 10 Pilotkunden mit hoher Aufwachrate und automatische Stabilitätsüberwachung.*
 
-- [ ] **AP 3.1: DynamoDB Pilot-Selector (`tools/select_pilot_devices.py`)**
-  - [ ] Scan/Query auf DynamoDB `iotCatalog`.
-  - [ ] Filtert je 10 Geräte `EPD7` und `EPD13` mit `deviceData.timeout in [60, 180]`.
-  - [ ] Setzt via AWS IoT Core Named Shadow (`settings.otaUrl`) die Pre-Release FOTA URL.
-  - [ ] Exportiert `canary_target_devices.json` für das Health-Gate.
-- [ ] **AP 3.2: Canary Health Gate Monitor (`tools/canary_monitor.py`)**
-  - [ ] Regelmäßige Abfrage von DynamoDB `iotCatalog` und `iotPayload` für die 20 Pilotgeräte.
-  - [ ] Auswertung: Update-Erfolgsquote (100% Ziel), Batterieverhalten (`batLevel`), Neustart-Zähler (`StartCounter`).
-  - [ ] Generierung eines Statusreports in GitHub Actions.
-  - [ ] Abbruch-Trigger bei Anomalien.
+- [x] **AP 3.1: DynamoDB Pilot-Selector (`tools/select_pilot_devices.py`)**
+  - [x] Paginierter Multi-Page Scan auf DynamoDB `iotCatalog`.
+  - [x] Filtert und bewertet je 10 Geräte `EPD7` und `EPD13` mit `deviceData.timeout in [60, 180]`, aktuellem Aktivitätsstatus und Batteriezustand.
+  - [x] Generiert strukturierte Empfehlungsberichte (`pilot_recommendations.md` & `pilot_recommendations.json`).
+  - [x] Zero-OTA Safe-Mode (Standard: Dry-Run / Read-Only). Zielgeräte werden vom Nutzer bestimmt (`canary_target_devices.json`).
+  - [x] Setzt via AWS IoT Core Named Shadow (`settings.otaUrl`) die Pre-Release FOTA URL nur bei explizitem `--apply --confirm-ota`.
+- [x] **AP 3.2: Canary Health Gate Monitor (`tools/canary_monitor.py`)**
+  - [x] Regelmäßige Abfrage von DynamoDB `iotCatalog` und `iotPayload` für die Pilotgeräte.
+  - [x] Auswertung: Update-Erfolgsquote (Adoption-Rate %), Batterieverhalten (`batLevel`), Neustart-Zähler / Crash-Loops (`StartCounter`) und Event-Quittungen.
+  - [x] Generierung eines strukturierten Statusreports in GitHub Actions (`$GITHUB_STEP_SUMMARY` & Artefakte `canary_health_report.md` / `.json`).
+  - [x] Abbruch-Trigger bei Anomalien (Exit Code 1 für Pipeline-Gating).
+  - [x] Dedizierter Dispatch-Workflow `.github/workflows/canary-health-gate.yml`.
 
 ---
 
@@ -114,3 +116,5 @@ Dieses Dokument dient zur Nachverfolgung der Implementierungsschritte für die C
 
 ## 📝 Changelog & Bearbeitungsstand
 * **2026-09-15:** Dokument initial erstellt. Phase 1 als erste Umsetzungstranche priorisiert.
+* **2026-09-16:** Phase 2 (HIL-Testbench Pipeline-Integration, Relais-HEX Power-Cycling, REST-Aktivierung & Presigned S3 Tests) erfolgreich abgeschlossen.
+* **2026-09-16:** Phase 3 (Canary Flotten-Scan, Empfehlungssystem mit Zero-OTA Safe-Mode und DynamoDB Health Gate Monitor `tools/canary_monitor.py`) vollständig implementiert.

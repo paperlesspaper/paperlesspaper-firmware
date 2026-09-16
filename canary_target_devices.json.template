@@ -1,0 +1,17 @@
+{
+  "description": "Vom Nutzer manuell freigegebene Zielger\u00e4te f\u00fcr das Canary Pre-Release",
+  "created_at": "2026-09-16T16:37:34.388256+00:00",
+  "candidate_version": "b3.0.X",
+  "devices": [
+    "epd7-dc1ed5613ec8",
+    "epd7-dc1ed5613e94",
+    "epd7-58e6c5eb7544",
+    "epd7-e4b0634f3354",
+    "epd7-dc1ed5613e5c",
+    "epd13-9c139ed69408",
+    "epd13-58e6c5ed5568",
+    "epd13-9c139ed764c0",
+    "epd13-9c139ed5802c",
+    "epd13-9c139ed74ee0"
+  ]
+}

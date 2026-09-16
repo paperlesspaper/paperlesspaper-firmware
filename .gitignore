@@ -20,4 +20,4 @@ testbench/cache/
 __pycache__/
 *.pyc
 testbench/hardware_mapping.json
-
+pilot_recommendations*

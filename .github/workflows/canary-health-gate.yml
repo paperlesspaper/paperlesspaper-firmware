@@ -1,0 +1,195 @@
+name: "Canary Health Gate (Phase 3)"
+run-name: "Canary: ${{ inputs.action }} (${{ inputs.target_version || inputs.ota_url || 'Scan' }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Auszuführende Aktion"
+        required: true
+        type: choice
+        default: "monitor"
+        options:
+          - "deploy"
+          - "monitor"
+          - "reset"
+          - "recommend"
+      target_devices:
+        description: "Zielgeräte (z. B. 'epd7-dc1ed5613ec8, epd13-9c139ed69408' - leer lassen für canary_target_devices.json)"
+        required: false
+        default: ""
+      ota_url:
+        description: "FOTA URL für das Canary Release (nur für 'deploy', z. B. 'http://ul.epaperframe.de/espfota_epd7_dev.json')"
+        required: false
+        default: "http://ul.epaperframe.de/espfota_epd7_dev.json"
+      target_version:
+        description: "Ziel-Firmware-Version (für 'monitor', z. B. '3.0.57')"
+        required: false
+        default: ""
+      min_adoption:
+        description: "Mindest-Adoptionsquote in % (für 'monitor')"
+        required: false
+        default: "80"
+      max_anomalies:
+        description: "Maximal tolerierte Anomalien (für 'monitor')"
+        required: false
+        default: "0"
+      watch_monitor:
+        description: "Kontinuierliches Polling (bis zu 10 Min) statt Einmalprüfung (für 'monitor')"
+        required: false
+        type: boolean
+        default: true
+      confirm_execution:
+        description: "⚠️ ICH BESTÄTIGE: Shadow-Änderung ('deploy' oder 'reset') für die Zielgeräte ausführen"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  canary:
+    name: "Canary: ${{ inputs.action }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3 requests
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-central-1' }}
+
+      # -------------------------------------------------------------
+      # 1. AKTION: RECOMMEND (Passiver Flottenscan)
+      # -------------------------------------------------------------
+      - name: Run Pilot Candidate Scan & Recommendations (Safe-Mode)
+        if: inputs.action == 'recommend'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+          AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
+        run: |
+          python tools/select_pilot_devices.py \
+            --output-md pilot_recommendations.md \
+            --output-json pilot_recommendations.json
+
+          if [ -f "pilot_recommendations.md" ]; then
+            cat pilot_recommendations.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Pilot Recommendations Artifact
+        if: inputs.action == 'recommend'
+        uses: actions/upload-artifact@v7
+        with:
+          name: canary_pilot_recommendations
+          path: |
+            pilot_recommendations.md
+            pilot_recommendations.json
+
+      # -------------------------------------------------------------
+      # 2. AKTION: DEPLOY (Canary Shadow setzen)
+      # -------------------------------------------------------------
+      - name: Deploy Canary OTA URL to Target Devices
+        if: inputs.action == 'deploy'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+          AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
+        run: |
+          dev_arg=""
+          if [ -n "${{ inputs.target_devices }}" ]; then
+            dev_arg="--device-ids ${{ inputs.target_devices }}"
+          fi
+
+          if [ "${{ inputs.confirm_execution }}" = "true" ]; then
+            echo "🚀 Ausrollen autorisiert: Setze Named Shadows für Zielgeräte..."
+            python tools/select_pilot_devices.py \
+              $dev_arg \
+              --ota-url "${{ inputs.ota_url }}" \
+              --apply \
+              --confirm-ota I_CONFIRM_CANARY_OTA
+          else
+            echo "::warning::Sicherheits-Checkbox war nicht aktiviert! Führe DRY-RUN Simulation aus."
+            python tools/select_pilot_devices.py \
+              $dev_arg \
+              --ota-url "${{ inputs.ota_url }}"
+          fi
+
+      # -------------------------------------------------------------
+      # 3. AKTION: RESET (Canary Shadow zurücksetzen)
+      # -------------------------------------------------------------
+      - name: Reset Canary Shadow for Target Devices
+        if: inputs.action == 'reset'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+          AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
+        run: |
+          dev_arg=""
+          if [ -n "${{ inputs.target_devices }}" ]; then
+            dev_arg="--device-ids ${{ inputs.target_devices }}"
+          fi
+
+          if [ "${{ inputs.confirm_execution }}" = "true" ]; then
+            echo "🔄 Zurücksetzen autorisiert: Leere Named Shadows der Zielgeräte..."
+            python tools/select_pilot_devices.py \
+              $dev_arg \
+              --reset \
+              --apply \
+              --confirm-ota I_CONFIRM_CANARY_OTA
+          else
+            echo "::warning::Sicherheits-Checkbox war nicht aktiviert! Führe DRY-RUN Simulation aus."
+            python tools/select_pilot_devices.py \
+              $dev_arg \
+              --reset
+          fi
+
+      # -------------------------------------------------------------
+      # 4. AKTION: MONITOR (Health-Gate Stabilitätsprüfung)
+      # -------------------------------------------------------------
+      - name: Run Canary Health Gate Monitor
+        if: inputs.action == 'monitor'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+          AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
+        run: |
+          devices_arg=""
+          if [ -n "${{ inputs.target_devices }}" ]; then
+            devices_arg="--device-ids ${{ inputs.target_devices }}"
+          fi
+
+          version_arg=""
+          if [ -n "${{ inputs.target_version }}" ]; then
+            version_arg="--target-version ${{ inputs.target_version }}"
+          fi
+
+          watch_arg=""
+          if [ "${{ inputs.watch_monitor }}" = "true" ]; then
+            watch_arg="--watch --interval 30 --timeout 600"
+          fi
+
+          python tools/canary_monitor.py \
+            $devices_arg \
+            $version_arg \
+            $watch_arg \
+            --min-adoption ${{ inputs.min_adoption }} \
+            --max-anomalies ${{ inputs.max_anomalies }} \
+            --output-md canary_health_report.md \
+            --output-json canary_health_report.json
+
+      - name: Upload Canary Health Gate Report Artifact
+        if: inputs.action == 'monitor' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: canary_health_report
+          path: |
+            canary_health_report.md
+            canary_health_report.json
