@@ -94,35 +94,42 @@ class TestEPD7Lifecycle:
                 config.EPD7_DEVICE_ID = info["uid"]
             print(f"🎉 [EPD7] Testgerät '{self.device_id}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
 
-    def test_01_ble_wifi_provisioning(self):
+    def test_01_ble_wifi_provisioning(self, request):
         """Schritt 1: Simuliert die drahtlose BLE-Provisionierung von WLAN-Credentials an das frisch zurückgesetzte Display."""
         if not BLEProvisioner.is_supported():
             pytest.skip("BLE / bleak ist auf diesem System nicht verfügbar.")
 
-        with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
-            print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
-            device.wait_for_pattern(
-                r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                timeout=30
-            )
-
-        print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD7 (UID: {self.device_id})...")
         try:
-            nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
-            print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
-            for n in nets[:5]:
-                print(f"   - {n['ssid']} ({n['rssi']} dBm)")
-        except Exception as e:
-            print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
+            with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
+                print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
+                device.wait_for_pattern(
+                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
+                    timeout=30
+                )
 
-        success = BLEProvisioner.provision_wifi(
-            self.device_id,
-            ssid=config.WIFI_SSID,
-            password=config.WIFI_PASSWORD,
-            timeout=25
-        )
-        assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
-        print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")
+            print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD7 (UID: {self.device_id})...")
+            try:
+                nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
+                print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
+                for n in nets[:5]:
+                    print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+            except Exception as e:
+                print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
+
+            success = BLEProvisioner.provision_wifi(
+                self.device_id,
+                ssid=config.WIFI_SSID,
+                password=config.WIFI_PASSWORD,
+                timeout=25
+            )
+            assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
+            print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")
+        except Exception as exc:
+            print(f"\n🛑 [EPD7] BLE-WLAN-Provisionierung fehlgeschlagen: {exc}")
+            print("   ➔ Ohne WLAN-Verbindung können nachfolgende Tests (OTA, AWS, REST) nicht funktionieren.")
+            print("   ➔ Beende Testlauf vorzeitig (Fail-Fast).")
+            request.session.shouldstop = f"EPD7 BLE-WLAN-Provisionierung fehlgeschlagen: {exc}"
+            raise
 
     def test_02_production_firmware_ota(self, aws_verifier):
         """Schritt 2: Flasht die offizielle Produktions-Firmware via OTA Manifest JSON und verifiziert den Reboot."""
@@ -311,35 +318,42 @@ class TestEPD13Lifecycle:
                 config.EPD13_DEVICE_ID = info["uid"]
             print(f"🎉 [EPD13] Testgerät '{self.device_id}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
 
-    def test_01_ble_wifi_provisioning(self):
+    def test_01_ble_wifi_provisioning(self, request):
         """Schritt 1: Simuliert die drahtlose BLE-Provisionierung von WLAN-Credentials an das frisch zurückgesetzte EPD13 Display."""
         if not BLEProvisioner.is_supported():
             pytest.skip("BLE / bleak ist auf diesem System nicht verfügbar.")
 
-        with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:
-            print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
-            device.wait_for_pattern(
-                r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                timeout=30
-            )
-
-        print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD13 (UID: {self.device_id})...")
         try:
-            nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
-            print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
-            for n in nets[:5]:
-                print(f"   - {n['ssid']} ({n['rssi']} dBm)")
-        except Exception as e:
-            print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
+            with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:
+                print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
+                device.wait_for_pattern(
+                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
+                    timeout=30
+                )
 
-        success = BLEProvisioner.provision_wifi(
-            self.device_id,
-            ssid=config.WIFI_SSID,
-            password=config.WIFI_PASSWORD,
-            timeout=25
-        )
-        assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
-        print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")
+            print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD13 (UID: {self.device_id})...")
+            try:
+                nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
+                print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
+                for n in nets[:5]:
+                    print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+            except Exception as e:
+                print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
+
+            success = BLEProvisioner.provision_wifi(
+                self.device_id,
+                ssid=config.WIFI_SSID,
+                password=config.WIFI_PASSWORD,
+                timeout=25
+            )
+            assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
+            print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")
+        except Exception as exc:
+            print(f"\n🛑 [EPD13] BLE-WLAN-Provisionierung fehlgeschlagen: {exc}")
+            print("   ➔ Ohne WLAN-Verbindung können nachfolgende Tests (OTA, AWS, REST) nicht funktionieren.")
+            print("   ➔ Beende Testlauf vorzeitig (Fail-Fast).")
+            request.session.shouldstop = f"EPD13 BLE-WLAN-Provisionierung fehlgeschlagen: {exc}"
+            raise
 
     def test_02_production_firmware_ota(self, aws_verifier):
         """Schritt 2: Flasht die offizielle Produktions-Firmware via OTA Manifest JSON und verifiziert den Reboot."""
