@@ -441,10 +441,19 @@ def apply_ota_to_selected_devices(target_devices, ota_url, dry_run=True, confirm
 
     for idx, dev_id in enumerate(target_devices, 1):
         thing_name = dev_id.strip()
+        dev_ota_url = ota_url
+        if "{target}" in dev_ota_url:
+            model = "epd13" if "13" in thing_name.lower() else "epd7"
+            dev_ota_url = dev_ota_url.replace("{target}", model)
+        elif "epd7" in dev_ota_url and "13" in thing_name.lower():
+            dev_ota_url = dev_ota_url.replace("epd7", "epd13")
+        elif "epd13" in dev_ota_url and ("epd7" in thing_name.lower() or "13" not in thing_name.lower()):
+            dev_ota_url = dev_ota_url.replace("epd13", "epd7")
+
         shadow_payload = {
             "state": {
                 "reported": {
-                    "otaUrl": ota_url
+                    "otaUrl": dev_ota_url
                 }
             }
         }
@@ -516,6 +525,20 @@ def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="
                 print(f"   ❌ Fehler beim Zurücksetzen von Shadow für '{thing_name}': {e}")
 
 
+def resolve_ota_url(ota_url=None, s3_bucket=None, branch=None):
+    """
+    Ermittelt die FOTA Manifest URL automatisch basierend auf Branch und S3-Bucket:
+    - main / master: espfota_{target}_pre.json (aus deploy_pre)
+    - andere Branches (z. B. paper-l/dev): espfota_{target}_dev.json (aus deploy)
+    """
+    if ota_url:
+        return ota_url
+    bucket = s3_bucket or os.environ.get("S3_BUCKET_NAME") or os.environ.get("HIL_S3_BUCKET") or "ul.epaperframe.de"
+    branch_name = branch or os.environ.get("GITHUB_REF_NAME") or "dev"
+    mode = "pre" if branch_name in ("main", "master") else "dev"
+    return f"http://{bucket}/espfota_{{target}}_{mode}.json"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Flotten-Scan & Empfehlungs-Generator für Canary Pilotgeräte (DynamoDB iotCatalog)"
@@ -528,38 +551,43 @@ def main():
     parser.add_argument("--output-json", default="pilot_recommendations.json", help="Pfad zur JSON-Ausgabedatei")
     parser.add_argument("--target-devices", help="Pfad zu einer JSON-Datei mit benutzerdefinierten Zielgeräten")
     parser.add_argument("--device-ids", help="Kommagetrennte Liste manueller Zielgeräte (z. B. 'epd7-xxx,epd13-yyy')")
-    parser.add_argument("--ota-url", help="FOTA Manifest URL für das Pre-Release")
+    parser.add_argument("--ota-url", help="FOTA Manifest URL für das Pre-Release (Standard: automatisch nach Branch)")
+    parser.add_argument("--deploy", action="store_true", help="Rollt die Canary OTA URL auf die Zielgeräte aus")
     parser.add_argument("--apply", action="store_true", help="Aktiviert das tatsächliche Setzen/Zurücksetzen der Shadows (erfordert --confirm-ota)")
     parser.add_argument("--reset", action="store_true", help="Setzt den otaUrl-Shadow der Zielgeräte zurück (auf null)")
+    parser.add_argument("--recommend", action="store_true", help="Führt den Flottenscan zur Ermittlung von Pilotgeräten aus")
     parser.add_argument("--confirm-ota", default="", help=f"Sicherheits-Bestätigungstoken: '{CONFIRMATION_PHRASE}'")
     parser.add_argument("--mock-file", help="Pfad zu einer JSON-Datei mit Test-Geräten (für Offline-/Testbench-Betrieb ohne AWS)")
     args = parser.parse_args()
 
     print("=" * 65)
-    print("🎯 DYNAMODB PILOT-SELECTOR & CANARY EMPFEHLUNGS-SYSTEM")
+    print("🎯 DYNAMODB PILOT-SELECTOR & CANARY ENGINE")
     print("=" * 65)
 
     # Zielgeräte ermitteln (Prio: CLI device-ids > target-devices > canary_target_devices.json > canary_target_devices.json.template)
-    selected_targets = []
+    raw_targets = []
     if args.device_ids:
-        selected_targets = [d.strip() for d in args.device_ids.split(",") if d.strip()]
+        raw_targets = [d.strip() for d in args.device_ids.replace("\n", ",").split(",") if d.strip()]
     elif args.target_devices and os.path.isfile(args.target_devices):
         with open(args.target_devices, "r", encoding="utf-8") as f:
             t_data = json.load(f)
-            selected_targets = t_data.get("devices", []) if isinstance(t_data, dict) else t_data
+            raw_targets = t_data.get("devices", []) if isinstance(t_data, dict) else t_data
     elif os.path.isfile("canary_target_devices.json"):
         with open("canary_target_devices.json", "r", encoding="utf-8") as f:
             t_data = json.load(f)
-            selected_targets = t_data.get("devices", []) if isinstance(t_data, dict) else t_data
+            raw_targets = t_data.get("devices", []) if isinstance(t_data, dict) else t_data
     elif os.path.isfile("canary_target_devices.json.template"):
         with open("canary_target_devices.json.template", "r", encoding="utf-8") as f:
             t_data = json.load(f)
-            selected_targets = t_data.get("devices", []) if isinstance(t_data, dict) else t_data
+            raw_targets = t_data.get("devices", []) if isinstance(t_data, dict) else t_data
 
-    # Falls Reset-Modus
+    # Bereinigen von Platzhaltern wie "epd7-XX"
+    selected_targets = [d for d in raw_targets if d and not d.endswith("-XX") and d != "XX"]
+
+    # 1. Falls Reset-Modus
     if args.reset:
         if not selected_targets:
-            print("❌ FEHLER: Für --reset müssen Zielgeräte übergeben werden (--device-ids oder canary_target_devices.json).")
+            print("❌ FEHLER: Für --reset müssen gültige Zielgeräte übergeben werden (--device-ids oder canary_target_devices.json).")
             sys.exit(1)
         is_dry_run = not args.apply
         reset_ota_for_selected_devices(
@@ -570,13 +598,34 @@ def main():
         )
         return
 
-    # Timeouts parsen
+    # 2. Falls Deploy-Modus oder Zielgeräte definiert sind (und kein expliziter --recommend Scan gewünscht ist)
+    if args.deploy or (selected_targets and not args.recommend):
+        if not selected_targets:
+            print("❌ FEHLER: Keine gültigen Zielgeräte definiert! Bitte übergebe --device-ids oder passe canary_target_devices.json an.")
+            sys.exit(1)
+
+        auto_url = resolve_ota_url(
+            args.ota_url,
+            s3_bucket=os.environ.get("S3_BUCKET_NAME") or os.environ.get("HIL_S3_BUCKET"),
+            branch=os.environ.get("GITHUB_REF_NAME")
+        )
+        is_dry_run = not args.apply
+        print(f"📡 Ziel-FOTA URL (Modell-Platzhalter {{target}}): {auto_url}")
+        apply_ota_to_selected_devices(
+            selected_targets,
+            auto_url,
+            dry_run=is_dry_run,
+            confirm_token=args.confirm_ota,
+            region=args.region
+        )
+        return
+
+    # 3. Flottenscan (nur bei explizitem --recommend oder wenn keine Geräte übergeben wurden)
     try:
         allowed_timeouts = tuple(int(x.strip()) for x in args.timeouts.split(",") if x.strip())
     except ValueError:
         allowed_timeouts = (60, 180)
 
-    # 1. Daten beziehen (Mock-Datei oder DynamoDB-Scan)
     if args.mock_file and os.path.isfile(args.mock_file):
         print(f"📦 Verwende Mock-Gerätedaten aus: {args.mock_file}")
         with open(args.mock_file, "r", encoding="utf-8") as f:
@@ -592,42 +641,17 @@ def main():
     else:
         devices = scan_all_epaper_devices(table_name=args.table, region=args.region)
 
-    # 2. Empfehlungen berechnen
     results = generate_recommendations(devices, target_count=args.count, allowed_timeouts=allowed_timeouts)
 
     print(f"📊 Auswertungsergebnis:")
     print(f"   - EPD7  Kandidaten im Katalog: {results['epd7']['total_found']} (Top {len(results['epd7']['recommendations'])} empfohlen)")
     print(f"   - EPD13 Kandidaten im Katalog: {results['epd13']['total_found']} (Top {len(results['epd13']['recommendations'])} empfohlen)")
 
-    # 3. Empfehlungsberichte speichern
     write_recommendations_markdown(results, output_file=args.output_md)
     write_recommendations_json(results, output_file=args.output_json)
     write_template_target_file(results, template_file="canary_target_devices.json.template")
 
-    # 4. Optional: Zielgeräte-Zuweisung (Standard: Safe-Mode / Dry-Run)
-    selected_targets = []
-    if args.target_devices and os.path.isfile(args.target_devices):
-        with open(args.target_devices, "r", encoding="utf-8") as f:
-            t_data = json.load(f)
-            selected_targets = t_data.get("devices", [])
-    elif args.device_ids:
-        selected_targets = [d.strip() for d in args.device_ids.split(",") if d.strip()]
-
-    if selected_targets and args.ota_url:
-        is_dry_run = not args.apply
-        apply_ota_to_selected_devices(
-            selected_targets,
-            args.ota_url,
-            dry_run=is_dry_run,
-            confirm_token=args.confirm_ota,
-            region=args.region
-        )
-    elif selected_targets and not args.ota_url:
-        print(f"\nℹ️ {len(selected_targets)} Zielgeräte definiert, aber keine --ota-url übergeben. Keine Shadow-Updates simuliert.")
-    else:
-        print("\n🔒 SAFE-MODE: Keine Zielgeräte für Shadow-Updates definiert. Es wurden keinerlei Geräte modifiziert.")
-        print("👉 Du kannst nun 'pilot_recommendations.md' prüfen und Zielgeräte in 'canary_target_devices.json' festlegen.")
-
 
 if __name__ == "__main__":
     main()
+

@@ -21,6 +21,3 @@ __pycache__/
 *.pyc
 testbench/hardware_mapping.json
 pilot_recommendations*
-canary_target_devices.json
-!canary_target_devices.json.template
-canary_health_report*

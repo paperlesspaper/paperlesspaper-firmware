@@ -371,6 +371,46 @@ def generate_json_report(metrics, output_file="canary_health_report.json"):
     print(f"💾 Canary Health-Gate JSON gespeichert: {output_file}")
 
 
+def resolve_target_version(target_version=None, s3_bucket=None, branch=None):
+    """Ermittelt die Ziel-Firmware-Version automatisch aus S3-Manifest oder types.h."""
+    if target_version:
+        return target_version
+
+    bucket = s3_bucket or os.environ.get("HIL_S3_BUCKET") or os.environ.get("S3_BUCKET_NAME") or "ul.epaperframe.de"
+    branch_name = branch or os.environ.get("GITHUB_REF_NAME") or "dev"
+    mode = "pre" if branch_name in ("main", "master") else "dev"
+
+    if bucket:
+        import urllib.request
+        for target in ("epd7", "epd13"):
+            url = f"http://{bucket}/espfota_{target}_{mode}.json"
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "canary-monitor/1.0"})
+                with urllib.request.urlopen(req, timeout=5) as res:
+                    data = json.loads(res.read().decode("utf-8"))
+                    v = data.get("version")
+                    if v and v != "X.X.X" and v != "0.0.0":
+                        print(f"🔍 Automatisch erkannte Ziel-Version von S3 ({url}): {v}")
+                        return v
+            except Exception:
+                pass
+
+    try:
+        types_path = os.path.join(os.path.dirname(__file__), "..", "src", "types.h")
+        if os.path.isfile(types_path):
+            with open(types_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                import re
+                m = re.search(r'#define\s+SOFTWARE_VERSION\s+"([^"]+)"', content)
+                if m and m.group(1) not in ("0.0.0", "X.X.X"):
+                    print(f"🔍 Automatisch erkannte Ziel-Version aus types.h: {m.group(1)}")
+                    return m.group(1)
+    except Exception:
+        pass
+
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Canary Health-Gate Monitor für E-Paper Displays (DynamoDB iotCatalog & iotPayload)"
@@ -408,8 +448,15 @@ def main():
             if not targets:
                 targets = list(mock_items.keys())
 
+    # Automatische Erkennung der Ziel-Version
+    detected_version = resolve_target_version(
+        target_version=args.target_version,
+        s3_bucket=os.environ.get("HIL_S3_BUCKET") or os.environ.get("S3_BUCKET_NAME"),
+        branch=os.environ.get("GITHUB_REF_NAME") or os.environ.get("BRANCH_NAME")
+    )
+
     print(f"🎯 Überwachte Zielgeräte ({len(targets)}): {', '.join(targets)}")
-    print(f"📌 Erwartete Version: {args.target_version or 'jede'}")
+    print(f"📌 Erwartete Version: {detected_version or 'jede (automatisch)'}")
     print(f"📊 Schwellenwerte: Min. Adoption={args.min_adoption}%, Max. Anomalien={args.max_anomalies}\n")
 
     catalog_table = None
@@ -427,7 +474,7 @@ def main():
             catalog_table,
             payload_table,
             targets,
-            target_version=args.target_version,
+            target_version=detected_version,
             start_time_ts=start_time_ts,
             mock_items=mock_items
         )
