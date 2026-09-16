@@ -1,0 +1,161 @@
+name: "HIL Hardware Testbench"
+run-name: "HIL Test (${{ github.ref_name }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Ziel-Hardware für den Test"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - epd7
+          - epd13
+      reset_method:
+        description: "Reset-Methode für Testgeräte (Relais ist Pflicht)"
+        required: true
+        default: "relay_hex"
+        type: choice
+        options:
+          - relay_hex
+
+jobs:
+  test_epd7:
+    name: "HIL Test: EPD7 (7.5\" Hardware)"
+    runs-on: [self-hosted, Windows, hil-testbench]
+    if: inputs.target == 'all' || inputs.target == 'epd7'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Testbench Dependencies
+        run: pip install -r testbench/requirements.txt
+
+      - name: Run EPD7 HIL Testbench
+        env:
+          RESET_METHOD: ${{ inputs.reset_method }}
+          HIL_WIFI_SSID: ${{ secrets.HIL_WIFI_SSID }}
+          HIL_WIFI_PASSWORD: ${{ secrets.HIL_WIFI_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+          AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
+          HIL_API_BASE_URL: ${{ secrets.HIL_API_BASE_URL }}
+          HIL_S3_BUCKET: ${{ secrets.HIL_S3_BUCKET }}
+          AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH_0_CLIENT_SECRET: ${{ secrets.AUTH_0_CLIENT_SECRET }}
+          AUTH_0_AUDIENCE: ${{ secrets.AUTH_0_AUDIENCE }}
+          AUTH_0_GRANT_TYPE: ${{ secrets.AUTH_0_GRANT_TYPE }}
+        run: |
+          python -m testbench.run_testbench --target epd7 --junitxml junit_epd7.xml -v
+
+      - name: Upload EPD7 JUnit Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: epaper_junit_epd7_${{ github.run_number }}
+          path: junit_epd7.xml
+          if-no-files-found: ignore
+
+  test_epd13:
+    name: "HIL Test: EPD13 (13.3\" Hardware)"
+    runs-on: [self-hosted, Windows, hil-testbench]
+    needs: test_epd7
+    if: always() && (inputs.target == 'all' || inputs.target == 'epd13') && (needs.test_epd7.result == 'success' || needs.test_epd7.result == 'skipped')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Testbench Dependencies
+        run: pip install -r testbench/requirements.txt
+
+      - name: Run EPD13 HIL Testbench
+        env:
+          RESET_METHOD: ${{ inputs.reset_method }}
+          HIL_WIFI_SSID: ${{ secrets.HIL_WIFI_SSID }}
+          HIL_WIFI_PASSWORD: ${{ secrets.HIL_WIFI_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+          AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
+          HIL_API_BASE_URL: ${{ secrets.HIL_API_BASE_URL }}
+          HIL_S3_BUCKET: ${{ secrets.HIL_S3_BUCKET }}
+          AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH_0_CLIENT_SECRET: ${{ secrets.AUTH_0_CLIENT_SECRET }}
+          AUTH_0_AUDIENCE: ${{ secrets.AUTH_0_AUDIENCE }}
+          AUTH_0_GRANT_TYPE: ${{ secrets.AUTH_0_GRANT_TYPE }}
+        run: |
+          python -m testbench.run_testbench --target epd13 --junitxml junit_epd13.xml -v
+
+      - name: Upload EPD13 JUnit Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: epaper_junit_epd13_${{ github.run_number }}
+          path: junit_epd13.xml
+          if-no-files-found: ignore
+
+  report:
+    name: "Testprotokoll & Step Summary"
+    runs-on: ubuntu-latest
+    needs: [test_epd7, test_epd13]
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Download EPD7 JUnit Results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: epaper_junit_epd7_${{ github.run_number }}
+          path: test_artifacts
+
+      - name: Download EPD13 JUnit Results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: epaper_junit_epd13_${{ github.run_number }}
+          path: test_artifacts
+
+      - name: Generate Test Protocol
+        run: |
+          epd7_arg=""
+          [ -f "test_artifacts/junit_epd7.xml" ] && epd7_arg="--junit-epd7 test_artifacts/junit_epd7.xml"
+          
+          epd13_arg=""
+          [ -f "test_artifacts/junit_epd13.xml" ] && epd13_arg="--junit-epd13 test_artifacts/junit_epd13.xml"
+
+          python tools/generate_test_protocol.py \
+            --fw-version "dispatch-${{ github.run_number }}" \
+            --commit-sha "${{ github.sha }}" \
+            --deploy-status "success" \
+            $epd7_arg $epd13_arg \
+            --output-md hil_test_protocol.md \
+            --output-json hil_test_protocol.json
+
+      - name: Publish Test Protocol Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: epaper_hil_protocol_${{ github.run_number }}
+          path: |
+            hil_test_protocol.md
+            hil_test_protocol.json
+
+      - name: Enforce Test Success
+        run: |
+          if [ "${{ needs.test_epd7.result }}" == "failure" ] || [ "${{ needs.test_epd13.result }}" == "failure" ]; then
+            echo "::error::Mindestens ein Hardware-Test ist fehlgeschlagen!"
+            exit 1
+          fi
+
+

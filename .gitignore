@@ -15,3 +15,9 @@ main.cpp.7inch
 compile_commands.json
 cover.bmp
 url_cover.bmp
+testbench/cache/
+*.bin
+__pycache__/
+*.pyc
+testbench/hardware_mapping.json
+

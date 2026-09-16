@@ -61,20 +61,26 @@ Dieses Dokument dient zur Nachverfolgung der Implementierungsschritte für die C
 ### Phase 2: Remote-Testbench & HIL-Suite (Windows Host)
 *Ziel: Vollautomatischer Test auf echten Geräten am Windows-PC via Python/PyTest.*
 
-- [ ] **AP 2.1: Testbench Controller (`testbench/hardware_controller.py`)**
-  - [ ] COM-Port-Erkennung für EPD7 und EPD13.
-  - [ ] Serial-Relais / DTR-RTS Reset-Funktion.
-  - [ ] Asynchroner Serial-Monitor mit Timeout & Event-Regex (`[MAIN] INIT Device V: ...`, `[NETWORK] WiFi Connected`, `[OTA] ...`).
-- [ ] **AP 2.2: Automated Flasher (`testbench/flasher.py`)**
-  - [ ] Ansteuerung von `esptool.py` zum Flashen einer definierten Baseline-Altversion vor dem Test.
-- [ ] **AP 2.3: End-to-End HIL Testfälle (`testbench/test_epd_lifecycle.py`)**
-  - [ ] Test 1: Baseline Flash -> Boot -> Deploy WiFi Connect.
-  - [ ] Test 2: Trigger OTA (Kandidaten-Firmware) -> Serial Log Quittung -> Reboot in neue Firmware.
-  - [ ] Test 3: Device Activation Handshake (`$aws/things/+/activateepaper`).
-  - [ ] Test 4: Image Request -> Render -> Prüfung des Bestätigungs-Events in DynamoDB `iotPayload`.
-  - [ ] Test 5: Deactivate -> Verifikation des Eintritts in Deep Sleep.
-- [ ] **AP 2.4: Windows GitHub Actions Self-Hosted Runner Konfiguration**
-  - [ ] Setup-Anleitung und PowerShell-Startskripte für den Windows-Testrechner.
+- [x] **AP 2.1: Testbench Controller (`testbench/hardware_controller.py`)**
+  - [x] COM-Port-Erkennung: Displays werden als **CP210x**, Relais als **CH340** automatisch erkannt.
+  - [x] Automatische Relais-Display-Zuordnung: Selektiver Power-Cycle einzelner CH340-Relais ermittelt durch Boot-Log-Beobachtung (`[MAIN] INIT Device V: ...`), welches Relais welches Display steuert.
+  - [x] Automatische Seriennummern- & Typ-Erkennung: Auslesen von MAC-Adresse (`CLIENT_ID` Suffix) und Display-Typ (`epd7` vs. `epd13`) aus den Boot-Logs der Firmware.
+  - [x] Hardware-Reset ausschließlich über USB-Relais (`relay_hex`), da DTR und Boot-Tasten hardwareseitig nicht angebunden sind.
+  - [x] Asynchroner Serial-Monitor mit Timeout & Event-Regex (`[MAIN] INIT Device V: ...`, `[NETWORK] WiFi Connected`, `[OTA] ...`).
+  - [x] Automatische Vorab-Prüfung (`verify_and_pair_hardware()`): Blockiert Tests mit klarer Diagnose, falls ein Display oder Relais fehlt.
+- [x] **AP 2.2: Shadow-basierte FOTA-Steuerung & Manifest-Verwaltung (`testbench/aws_client.py` & `flasher.py`)**
+  - [x] FOTA-Updates werden rein über die AWS IoT Named Shadow API (`https://<iot-endpoint>/things/{thingName}/shadow?name=settings`) gesteuert.
+  - [x] Automatisches Herunterladen und Parsen der aktuellen Produktions-Manifeste (`espfota_epd7.json` / `espfota_epd13.json`) sowie Kandidaten-Manifeste (`espfota_epd7_pre.json` / `espfota_epd13_pre.json`).
+- [x] **AP 2.3: End-to-End HIL Testfälle (`testbench/test_epd_lifecycle.py` & `run_testbench.py`)**
+  - [x] Test 1: Sicherstellung Baseline: Prüft aktuelle Firmware; falls abweichend, setzt Shadow `otaUrl` auf Produktion und erzwingt OTA via Relais-Power-Cycle.
+  - [x] Test 2: Trigger OTA auf Kandidaten-Firmware via Shadow API (`settings.otaUrl`) -> Relais Power-Cycle -> Log-Quittung -> Reboot in neue Firmware mit Versionsprüfung.
+  - [x] Test 3: Device Activation Handshake (`$aws/things/+/activateepaper`) und Validierung in DynamoDB `iotCatalog`.
+  - [x] Test 4: Image Request -> Render -> Prüfung des Bestätigungs-Events in DynamoDB `iotPayload`.
+  - [x] Test 5: Deactivate -> Verifikation des Eintritts in Deep Sleep.
+  - [x] CLI-Runner `testbench/run_testbench.py` mit `--verify`, `--list-ports` (CP210x vs. CH340) und obligatorischer Vorab-Prüfung vor dem Testlauf.
+- [x] **AP 2.4: Windows GitHub Actions Self-Hosted Runner Konfiguration**
+  - [x] Setup-Skript `testbench/setup_runner.ps1` für Windows Runner (Python, Treiber, Abhängigkeiten, Runner-Registrierung).
+  - [x] Dedizierter GitHub Actions Workflow `.github/workflows/hil-test.yml` mit `workflow_dispatch` Parametern.
 
 ---
 
