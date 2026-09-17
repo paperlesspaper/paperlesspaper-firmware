@@ -79,13 +79,14 @@ jobs:
           fi
 
       # -------------------------------------------------------------
-      # 2. AKTION: RESET (Canary Shadow zurücksetzen)
+      # 2. AKTION: RESET (Rollback auf reguläre Hauptversion)
       # -------------------------------------------------------------
       - name: Reset Canary Shadow for Target Devices
         if: inputs.action == 'reset'
         env:
           AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
           AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME || secrets.HIL_S3_BUCKET }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           dev_arg=""
@@ -94,7 +95,7 @@ jobs:
           fi
 
           if [ "${{ inputs.confirm_execution }}" = "true" ]; then
-            echo "🔄 Zurücksetzen autorisiert: Leere Named Shadows der Zielgeräte..."
+            echo "🔄 Zurücksetzen autorisiert: Setze Zielgeräte auf reguläre Hauptversion (main/production)..."
             python tools/select_pilot_devices.py \
               $dev_arg \
               --reset \
@@ -111,7 +112,7 @@ jobs:
       # 3. AKTION: MONITOR / HEALTH GATE
       # -------------------------------------------------------------
       - name: Run Canary Health Gate Monitor
-        if: inputs.action == 'monitor' || (inputs.action == 'deploy' && inputs.confirm_execution == true)
+        if: inputs.action == 'monitor' || ((inputs.action == 'deploy' || inputs.action == 'reset') && inputs.confirm_execution == true)
         env:
           AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
           AWS_IOT_ENDPOINT: ${{ secrets.AWS_IOT_ENDPOINT }}
@@ -123,8 +124,14 @@ jobs:
             devices_arg="--device-ids ${{ inputs.target_devices }}"
           fi
 
+          reset_arg=""
+          if [ "${{ inputs.action }}" = "reset" ]; then
+            reset_arg="--reset"
+          fi
+
           python tools/canary_monitor.py \
             $devices_arg \
+            $reset_arg \
             --watch \
             --interval 30 \
             --timeout 600 \
@@ -134,7 +141,7 @@ jobs:
             --output-json canary_health_report.json
 
       - name: Upload Canary Health Gate Report Artifact
-        if: (inputs.action == 'monitor' || inputs.action == 'deploy') && always()
+        if: (inputs.action == 'monitor' || inputs.action == 'deploy' || inputs.action == 'reset') && always()
         uses: actions/upload-artifact@v7
         with:
           name: canary_health_report_${{ github.ref_name }}

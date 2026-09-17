@@ -371,26 +371,33 @@ def generate_json_report(metrics, output_file="canary_health_report.json"):
     print(f"💾 Canary Health-Gate JSON gespeichert: {output_file}")
 
 
-def resolve_target_version(target_version=None, s3_bucket=None, branch=None):
+def resolve_target_version(target_version=None, s3_bucket=None, branch=None, is_reset=False):
     """Ermittelt die Ziel-Firmware-Version automatisch aus S3-Manifest oder types.h."""
     if target_version:
         return target_version
 
     bucket = s3_bucket or os.environ.get("HIL_S3_BUCKET") or os.environ.get("S3_BUCKET_NAME") or "ul.epaperframe.de"
-    branch_name = branch or os.environ.get("GITHUB_REF_NAME") or "dev"
-    mode = "pre" if branch_name in ("main", "master") else "dev"
+    
+    if is_reset:
+        url_pattern = f"http://{bucket}/espfota_{{target}}.json"
+        mode_label = "Haupt-Version (main/production)"
+    else:
+        branch_name = branch or os.environ.get("GITHUB_REF_NAME") or "dev"
+        mode = "pre" if branch_name in ("main", "master") else "dev"
+        url_pattern = f"http://{bucket}/espfota_{{target}}_{mode}.json"
+        mode_label = f"Ziel-Version ({mode})"
 
     if bucket:
         import urllib.request
         for target in ("epd7", "epd13"):
-            url = f"http://{bucket}/espfota_{target}_{mode}.json"
+            url = url_pattern.format(target=target)
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "canary-monitor/1.0"})
                 with urllib.request.urlopen(req, timeout=5) as res:
                     data = json.loads(res.read().decode("utf-8"))
                     v = data.get("version")
                     if v and v != "X.X.X" and v != "0.0.0":
-                        print(f"🔍 Automatisch erkannte Ziel-Version von S3 ({url}): {v}")
+                        print(f"🔍 Automatisch erkannte {mode_label} von S3 ({url}): {v}")
                         return v
             except Exception:
                 pass
@@ -418,6 +425,7 @@ def main():
     parser.add_argument("--target-devices", help="Pfad zur JSON-Datei mit freigegebenen Zielgeräten (z. B. canary_target_devices.json)")
     parser.add_argument("--device-ids", help="Kommagetrennte Liste von Zielgeräten (z. B. 'epd7-xxx,epd13-yyy')")
     parser.add_argument("--target-version", help="Erwartete Firmware-Version nach dem Update (z. B. '3.0.57')")
+    parser.add_argument("--reset", action="store_true", help="Überwacht den Rollback auf die reguläre Hauptversion (main/production)")
     parser.add_argument("--table-catalog", default="iotCatalog", help="DynamoDB Tabelle iotCatalog")
     parser.add_argument("--table-payload", default="iotPayload", help="DynamoDB Tabelle iotPayload")
     parser.add_argument("--region", default=os.environ.get("AWS_REGION", "eu-central-1"), help="AWS Region")
@@ -452,7 +460,8 @@ def main():
     detected_version = resolve_target_version(
         target_version=args.target_version,
         s3_bucket=os.environ.get("HIL_S3_BUCKET") or os.environ.get("S3_BUCKET_NAME"),
-        branch=os.environ.get("GITHUB_REF_NAME") or os.environ.get("BRANCH_NAME")
+        branch=os.environ.get("GITHUB_REF_NAME") or os.environ.get("BRANCH_NAME"),
+        is_reset=args.reset
     )
 
     print(f"🎯 Überwachte Zielgeräte ({len(targets)}): {', '.join(targets)}")
