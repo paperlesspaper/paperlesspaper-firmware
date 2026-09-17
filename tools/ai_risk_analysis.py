@@ -25,42 +25,156 @@ if sys.platform == "win32":
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
-SYSTEM_PROMPT = """Du bist ein hochqualifizierter Senior Embedded Systems & Firmware Security Auditor, spezialisiert auf ESP32 Microcontroller (C++/Arduino), E-Paper Displays und AWS IoT Cloud-Anbindung.
+SYSTEM_PROMPT = """Du bist ein hochqualifizierter Senior Embedded Systems & Firmware Security Auditor, spezialisiert auf das PaperlessPaper E-Paper Ökosystem (ESP32-C6 Microcontroller EPD7/EPD13, PaperlessPaper Web/Mobile App und AWS IoT Cloud-Anbindung).
+Dokumentation des Gesamtsystems: https://github.com/paperlesspaper und https://github.com/paperlesspaper/paperlesspaper-docs.
 
-Deine Aufgabe ist es, das übergebene Git-Diff einer neuen Firmware-Version auf Sicherheits-, Stabilitäts- und Regressionsrisiken zu prüfen.
+Deine Hauptaufgabe ist es, die aktuellen Änderungen (Git-Diff) und deren Auswirkung auf das Gesamtsystem zu prüfen sowie konkrete, umsetzbare Endprodukt- & App-Testaufgaben für den Anwender zu definieren.
+Der bereitgestellte Gesamtcode dient als Architektur- und Sicherheitskontext.
 
-Achte besonders auf:
-1. **FOTA & Bootloader:** Manipulation von OTA-URLs, Partitionsgrenzen, SPIFFS/Flash-Offsets, esp32FOTA-Logik.
-2. **Watchdog & Deadlocks:** Blockierende Schleifen (`while (...)`) ohne Watchdog-Reset (`tickerFailsave`), Timeouts.
-3. **Power Management & Deep Sleep:** Fehlerhafte GPIOs vor Deep Sleep, Endlosschleifen vor `gotToDeepSleep()`, Akku-Drain.
-4. **Speicherstabilität:** Häufige dynamische Allokationen (`new`, `malloc`, `String += ...`) in Loops (Heap-Fragmentierung).
-5. **Hardcodierte Secrets:** Passwörter, API-Keys oder Zertifikate.
+WICHTIGE PRIORISIERUNGS- UND STRUKTURREGELN:
+1. **Abschnitt 1: Bewertung der aktuellen Code-Änderungen (Git-Diff):** Steht an erster Stelle!
+   - Was wurde im Diff geändert?
+   - Welche Risiken, Seiteneffekte oder architektonischen Auswirkungen auf das Endprodukt oder das Verhalten der App ergeben sich?
+   - Bei LOW: 2-3 prägnante Kernpunkte, was geändert wurde und warum kein Risiko besteht.
+   - Bei MEDIUM/HIGH: Detaillierte Schwachstellen mit Datei-, Zeilen- und Funktionsbezug.
 
-WICHTIGE ANWEISUNG ZUR FORM:
-- Halte die Zusammenfassung und Auswertung gerade bei niedrigem Risiko (LOW) SEHR KURZ und prägnant (maximal 2-3 knappe Aufzählungspunkte insgesamt, keine ausschweifenden Erklärungen).
-- Nur bei tatsächlichen Risiken (MEDIUM oder HIGH) sind detaillierte Ausführungen erforderlich.
+2. **Abschnitt 2: Endprodukt- & App-Testtasks für den Nutzer:** Steht an zweiter Stelle und ist besonders wichtig!
+   - **STRIKTES VERBOT VON ENTWICKLER-/BUILD-TASKS:** Formuliere KEINE Aufgaben wie "Kompiliere mit PlatformIO", "Flashe per USB-C", "Starte Python-Skripte", "Prüfe Git-Diff" oder Compiler-Warnungen!
+   - **NUR TESTAUFGABEN AM ECHTEN ENDPRODUKT IM ZUSAMMENSPIEL MIT DER PAPERLESSPAPER-APP:**
+     Definiere 2 bis 4 konkrete, handlungsorientierte Aufgaben mit Markdown-Checkboxen (`- [ ] **Task X: ...**`), die ein Nutzer am fertigen E-Paper Rahmen (EPD7 / EPD13) zusammen mit der PaperlessPaper App durchführen kann, um die einwandfreie Funktion zu gewährleisten:
+     * **BLE-Onboarding & WLAN-Provisionierung via App:** Gerät einschalten / zurücksetzen -> Startbildschirm/QR-Code auf dem E-Paper -> In der App per Bluetooth koppeln, WLAN wählen, Credentials senden -> Display bestätigt Verbindung.
+     * **Bildübertragung & Rendering via App:** In der App ein Bild, Dokument oder Widget an den Rahmen senden -> Display wacht auf, lädt Bild, führt sauberen Refresh aus (Farbdarstellung, Dithering) und quittiert erfolgreich in der App.
+     * **Einstellungen & Deep Sleep:** In der App Bild-Rotation, Update-Intervall oder Ruhemodus ändern -> Prüfen, ob Display die Settings übernimmt und danach sauber in den Deep Sleep (stromsparend) wechselt.
+     * **Firmware-Update (OTA) via Cloud/App:** In der App ein Update anstoßen -> Display zeigt "Updating Software...", flasht ohne Abbruch und bootet sauber in die neue Version.
+     * **Hardware-Taster am Rahmen:** 1x Taster drücken für manuellen Refresh; 5x Taster drücken für Werksreset (Rückkehr zum QR-Code Onboarding).
+   - Jeder Task muss enthalten:
+     * **Test-Fokus:** Was wird am Endprodukt verifiziert?
+     * **Aktion (App & Gerät):** Genaue Schritt-für-Schritt Anleitung, was der Nutzer in der App klickt und am Gerät tut.
+     * **Erwartetes Verhalten am Endprodukt:** Was genau sieht der Nutzer auf dem E-Paper Display und in der App?
+
+3. **Abschnitt 3: Ganzheitliche Systemanalyse (Gesamtcode):** Steht an letzter Stelle!
+   - **WICHTIG BEI GERINGEM RISIKO (LOW):** Halte diesen Abschnitt **extrem kurz und kompakt** (maximal 3-4 knappe Bullet-Points als Bestätigung, dass Boot-Loop, OTA, Deep Sleep und Watchdog in der Gesamtarchitektur solide und unbeeinträchtigt sind).
+   - **Nur bei MITTEL oder HOCH:** Führe eine detaillierte Risikoaufschlüsselung der Schwachstellen im Gesamtcode durch.
 
 Gib deine Antwort in folgendem Markdown-Format auf Deutsch aus:
-# 🛡️ KI-Firmware Risikoanalyse
+
+# 🛡️ KI-Firmware Risikoanalyse & Audit-Report
 
 ### Gesamtbewertung: [🟢 GERING (LOW) | 🟡 MITTEL (MEDIUM) | 🔴 HOCH (HIGH)]
 **Empfehlung:** [GENEHMIGT | MANUELLE PRÜFUNG EMPFOHLEN | BLOCKIERT]
 
-### Zusammenfassung & Risikobewertung
-- Bei LOW: Max. 2-3 prägnante Stichpunkte zur Änderung und Bestätigung, dass keine Risiken vorliegen.
-- Bei MEDIUM/HIGH: Konkrete Schwachstellen mit Zeilen- und Funktionsbezug.
+---
 
-### HIL-Testfokus
-- 1-2 wesentliche Punkte, die auf der echten Hardware verifiziert werden sollten.
+### 1. 🔍 Bewertung der aktuellen Code-Änderungen (Git-Diff)
+- [Präzise Analyse der Änderungen im Diff und Einfluss auf Gerät & App. Bei LOW: 2-3 Kernpunkte. Bei MEDIUM/HIGH: Detaillierte Schwachstellen.]
+
+---
+
+### 2. 📱 Endprodukt- & App-Testtasks für den Nutzer
+- [ ] **Task 1: [Prägnanter Titel, z. B. Bildübertragung & Rendering via App]**
+  - **Test-Fokus:** [Was am Gerät/App geprüft wird]
+  - **Aktion (App & Gerät):** [Schritt-für-Schritt Anleitung für den Nutzer]
+  - **Erwartetes Verhalten:** [Was auf dem E-Paper Display und in der App sichtbar passiert]
+- [ ] **Task 2: [Prägnanter Titel, z. B. BLE-Onboarding oder Settings-Sync via App]**
+  - **Test-Fokus:** [Was am Gerät/App geprüft wird]
+  - **Aktion (App & Gerät):** [Schritt-für-Schritt Anleitung für den Nutzer]
+  - **Erwartetes Verhalten:** [Was auf dem E-Paper Display und in der App sichtbar passiert]
+- [ ] **Task 3: [Prägnanter Titel, z. B. Manueller Taster-Refresh & Sleep-Verhalten]**
+  - **Test-Fokus:** [Was am Gerät/App geprüft wird]
+  - **Aktion (App & Gerät):** [Schritt-für-Schritt Anleitung für den Nutzer]
+  - **Erwartetes Verhalten:** [Was auf dem E-Paper Display und in der App sichtbar passiert]
+
+---
+
+### 3. 🌐 Ganzheitliche Systemanalyse (Gesamtcode)
+*(Kompakt bei LOW; detailliert nur bei MEDIUM/HIGH)*
+- **Boot-Loop-Resilienz:** [Kurzbestätigung bei LOW / Detailanalyse bei MEDIUM/HIGH]
+- **OTA-Funktionalität:** [Kurzbestätigung bei LOW / Detailanalyse bei MEDIUM/HIGH]
+- **Power Management & Deep Sleep:** [Kurzbestätigung bei LOW / Detailanalyse bei MEDIUM/HIGH]
+- **Watchdog & Stabilität:** [Kurzbestätigung bei LOW / Detailanalyse bei MEDIUM/HIGH]
 """
 
+
 def sanitize_diff(diff_text):
-    """Filtert sensible Werte wie Passwörter, Private Keys und Tokens aus dem Diff vor der Übertragung."""
+    """Filtert sensible Werte wie Passwörter, Private Keys und Tokens aus dem Text vor der Übertragung."""
     # Redaktiere Zertifikatsblöcke
     diff_text = re.sub(r"-----BEGIN [A-Z ]+-----[^-]+-----END [A-Z ]+-----", "[REDACTED_CERTIFICATE]", diff_text)
     # Redaktiere gängige Key/Secret-Muster
     diff_text = re.sub(r'(?i)(password|secret|token|api_?key|auth|pass)\s*[:=]\s*["\']([^"\']+)["\']', r'\1: "[REDACTED]"', diff_text)
     return diff_text
+
+
+def get_codebase_context():
+    """
+    Sammelt den vollständigen, funktionsrelevanten Firmware-Quellcode zur ganzheitlichen Systemanalyse:
+    - Analysiert alle Code-Dateien im Ordner 'src/' (.cpp, .c, .h, .hpp).
+    - Beschränkt die Codebase auf sinnvolle Parts der Firmware:
+      * Reine Bitmap-Assets (z.B. icons.h mit 66 KB statischen Hex-Arrays) werden nicht als Roh-Bytes übertragen,
+        sondern als Asset-Hinweis deklariert, um das Token-Budget für Logik zu reservieren.
+      * Sensible Dateien (secrets.h, secrets.h.sample, .env*) sind strikt ausgeschlossen und alle Inhalte werden maskiert.
+    - Bezieht fundamentale Hardware- & Build-Konfigurationen (part.csv, deploy/platformio.ini) ein.
+    """
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    src_dir = os.path.join(root_dir, "src")
+
+    context_parts = []
+
+    # 1. Relevante Konfigurationsdateien außerhalb von src/
+    config_files = [
+        ("part.csv", "Partitions-Tabelle & Flash-Offsets"),
+        ("deploy/platformio.ini", "PlatformIO Konfiguration & Build-Flags")
+    ]
+    for rel_path, desc in config_files:
+        full_path = os.path.join(root_dir, rel_path)
+        if os.path.isfile(full_path):
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = sanitize_diff(f.read())
+                    context_parts.append(f"#### Datei: `{rel_path}` ({desc})\n```ini\n{content}\n```")
+            except Exception as e:
+                print(f"Hinweis: Konnte {rel_path} nicht lesen: {e}")
+
+    # 2. Alle relevanten Code-Dateien im Ordner src/
+    EXCLUDED_FILENAMES = {
+        "secrets.h",
+        "secrets.h.sample",
+        "cmakelists.txt"
+    }
+
+    ASSET_ONLY_FILES = {
+        "icons.h": "Statische UI-Bitmap-Assets (imageArrow, Icons etc. - ausgelassen zur Vermeidung von Token-Ballast)"
+    }
+
+    if os.path.isdir(src_dir):
+        for entry in sorted(os.listdir(src_dir)):
+            full_path = os.path.join(src_dir, entry)
+            if not os.path.isfile(full_path):
+                continue
+
+            entry_lower = entry.lower()
+
+            # Sicherheitscheck: Niemals Secrets oder Build-Dateien aufnehmen
+            if "secret" in entry_lower or entry_lower in EXCLUDED_FILENAMES:
+                continue
+
+            # Reine Asset-Dateien kennzeichnen statt 66 KB Hex-Arrays zu senden
+            if entry in ASSET_ONLY_FILES:
+                context_parts.append(f"#### Datei: `src/{entry}`\n/* {ASSET_ONLY_FILES[entry]} */\n")
+                continue
+
+            # Nur C/C++ Quellcode- und Headerdateien aufnehmen
+            ext = os.path.splitext(entry)[1].lower()
+            if ext in (".cpp", ".c", ".h", ".hpp"):
+                try:
+                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = sanitize_diff(f.read())
+                        context_parts.append(f"#### Datei: `src/{entry}`\n```cpp\n{content}\n```")
+                except Exception as e:
+                    print(f"Hinweis: Konnte src/{entry} nicht lesen: {e}")
+
+    return "\n\n".join(context_parts)
+
+
 
 def get_git_diff(base_ref=None, staged_only=False):
     try:
@@ -101,24 +215,53 @@ def get_git_diff(base_ref=None, staged_only=False):
         print(f"Hinweis: Git-Diff konnte nicht ermittelt werden: {e}")
         return ""
 
-def call_gemini(diff_text, api_key):
-    # Diff bei sehr großen Änderungen kürzen, um Kontextgrenzen nicht zu überlasten
-    max_chars = 30000
-    if len(diff_text) > max_chars:
-        diff_text = diff_text[:max_chars] + "\n\n[... Diff gekürzt auf 30.000 Zeichen ...]"
+
+def call_gemini(diff_text, codebase_text, api_key):
+    # Diff bei extrem großen Änderungen kürzen
+    max_diff_chars = 40000
+    if diff_text and len(diff_text) > max_diff_chars:
+        diff_text = diff_text[:max_diff_chars] + "\n\n[... Diff gekürzt auf 40.000 Zeichen ...]"
+
+    prompt_parts = [
+        "Führe die Firmware-Risikoanalyse durch. Fokussiere dich primär auf das Git-Diff und leite konkrete Test-Tasks für den Endnutzer am fertigen Gerät im Zusammenspiel mit der PaperlessPaper-App ab (keine Entwickler-/Build-Befehle!). Die ganzheitliche Systemanalyse des Gesamtcodes steht an letzter Stelle und ist bei geringem Risiko kompakt zu halten.\n\n"
+    ]
+
+    if diff_text:
+        prompt_parts.append(
+            f"=================================================================\n"
+            f"### 1. AKTUELLE CODE-ÄNDERUNGEN (GIT-DIFF):\n"
+            f"=================================================================\n"
+            f"```diff\n{diff_text}\n```\n\n"
+        )
+    else:
+        prompt_parts.append(
+            "=================================================================\n"
+            "### 1. AKTUELLE CODE-ÄNDERUNGEN:\n"
+            "=================================================================\n"
+            "*(Keine spezifischen Zeilenänderungen im Diff – Vollständiger Audit des Repository-Stands)*\n\n"
+        )
+
+    prompt_parts.append(
+        f"=================================================================\n"
+        f"### 2. VOLLSTÄNDIGER FIRMWARE-QUELLCODE & KONFIGURATION:\n"
+        f"=================================================================\n"
+        f"{codebase_text}\n"
+    )
+
+    user_prompt_text = "".join(prompt_parts)
 
     payload = {
         "contents": [
             {
                 "parts": [
                     {"text": SYSTEM_PROMPT},
-                    {"text": f"Hier ist das zu prüfende Firmware Git-Diff (sensible Secrets vorab maskiert):\n\n```diff\n{diff_text}\n```"}
+                    {"text": user_prompt_text}
                 ]
             }
         ],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 2048
+            "maxOutputTokens": 4096
         }
     }
 
@@ -141,7 +284,7 @@ def call_gemini(diff_text, api_key):
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            with urllib.request.urlopen(req, timeout=90) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 text = data["candidates"][0]["content"]["parts"][0]["text"]
                 return text, model
@@ -163,6 +306,7 @@ def call_gemini(diff_text, api_key):
             continue
 
     raise RuntimeError(f"Keines der Modelle ({models_to_try}) konnte aufgerufen werden. Letzter Fehler: {last_error}")
+
 
 def load_env_file():
     """Liest Umgebungsvariablen aus der lokalen .env-Datei (für lokale Tests), ohne externe Abhängigkeiten."""
@@ -188,8 +332,9 @@ def load_env_file():
         pass
     return env_vars
 
+
 def main():
-    parser = argparse.ArgumentParser(description="KI-Firmware Risikoanalyse via Google Gemini API")
+    parser = argparse.ArgumentParser(description="KI-Firmware Risikoanalyse & Gesamtsystem-Audit via Google Gemini API")
     parser.add_argument("--base", help="Git Basis-Ref für den Diff (z.B. origin/main oder HEAD~1)")
     parser.add_argument("--diff-file", help="Optionaler Pfad zu einer Datei, die das Git-Diff enthält")
     parser.add_argument("--staged", action="store_true", help="Nur gestagte Änderungen prüfen (git diff --cached)")
@@ -219,18 +364,25 @@ def main():
     else:
         diff_text = get_git_diff(args.base, staged_only=args.staged)
 
-    if not diff_text:
-        print("ℹ️ Keine relevanten Code-Änderungen im Diff gefunden. Keine KI-Analyse erforderlich.")
+    # Gesamten Firmware-Quellcode laden
+    codebase_text = get_codebase_context()
+
+    if not diff_text and not codebase_text:
+        print("ℹ️ Weder Code-Änderungen noch Quellcode-Dateien gefunden. Keine KI-Analyse erforderlich.")
         sys.exit(0)
 
-    print("=" * 60)
-    print("🤖 STARTE KI-RISIKOANALYSE")
-    print(f"📏 Diff-Größe: {len(diff_text):,} Zeichen")
-    print("=" * 60)
+    print("=" * 65)
+    print("🤖 STARTE KI-RISIKOANALYSE & GESAMTSYSTEM-AUDIT")
+    if diff_text:
+        print(f"📏 Diff-Größe:      {len(diff_text):,} Zeichen")
+    else:
+        print("📏 Diff:            Keine uncommitteten Änderungen (Gesamtaudit)")
+    print(f"📦 Quellcode-Basis: {len(codebase_text):,} Zeichen (alle funktionalen src/* Dateien, part.csv, platformio.ini)")
+    print("=" * 65)
 
     try:
-        report, used_model = call_gemini(diff_text, api_key)
-        print(f"✨ Modell: {used_model}")
+        report, used_model = call_gemini(diff_text, codebase_text, api_key)
+        print(f"✨ Verwendetes Modell: {used_model}")
         print(report)
 
         if args.output:
@@ -259,6 +411,7 @@ def main():
         print(f"❌ Fehler bei der KI-Risikoanalyse: {e}")
         print("::error::KI-Risikoanalyse fehlgeschlagen! Pipeline wird abgebrochen.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

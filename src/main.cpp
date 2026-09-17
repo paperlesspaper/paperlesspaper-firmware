@@ -19,8 +19,10 @@
 #include <esp_pm.h>
 #include <esp_sleep.h>
 #include <esp_wifi.h>
+#include <nvs_flash.h>
 #include <rom/crc.h>
 #include <rom/rtc.h>
+#include <soc/lp_aon_reg.h>
 #include <vector>
 
 #include "EEPROM.h"
@@ -254,6 +256,7 @@ bool sdInit(bool forceFormat = false);
 void sdTest(bool doLog = false);
 bool downloadBMPToFlash(const char* url, const char* filename, bool forceDownload = false);
 wakeup_reason_t getWakeupReason();
+void rebootIntoRomBootloader();
 
 void WiFiEvent(WiFiEvent_t event) {
    if (DEBUG_FLAG)
@@ -386,6 +389,18 @@ void iotReceiveHandler(String& topic, String& payload) {
       if (strcmp(activated, "reset") == 0) {
          Serial.println("[AWS RX] Device activation reset");
          deviceActivationReset = true;
+      }
+   }
+
+   if (doc["cmd"].is<JsonString>()) {
+      const char* command = doc["cmd"];
+      if (strcmp(command, "wipe") == 0) {
+         Serial.println("[AWS RX] Command 'wipe' received via MQTT. Triggering Factory Reset...");
+         debugCheck();
+         return;
+      } else if (strcmp(command, "bootloader") == 0) {
+         Serial.println("[AWS RX] Command 'bootloader' received via MQTT. Rebooting into ROM Bootloader...");
+         rebootIntoRomBootloader();
       }
    }
 }
@@ -2239,6 +2254,19 @@ bool resetAll(bool resetActivation, bool resetWifi) {
 
 void debugCheck() {
    Serial.println("[DEBUG] Deploy State");
+
+#ifdef EPD_TYPE_13INCH
+   sdInit(true);  // forceFormat formats the SD card via FatFormatter
+#endif
+   SerialFlash.eraseAll();
+   while (!SerialFlash.ready()) {
+      vTaskDelay(10);
+   }
+
+   nvs_flash_erase();
+   nvs_flash_init();
+   EepromInit(EEPROM_SIZE);
+
    resetAll(false, true);
    setDisplayData(CLIENT_ID, systemData.vddValue);
    printDebugInfo();
@@ -2263,17 +2291,37 @@ void debugCheck() {
    return;
 }
 
-// test if a byte is set via serial to enter deploy mode
+void rebootIntoRomBootloader() {
+   Serial.println("[SYSTEM] Rebooting into ROM Download Bootloader...");
+   Serial.flush();
+   delay(100);
+#ifdef LP_AON_SYS_CFG_REG
+   REG_WRITE(LP_AON_SYS_CFG_REG, REG_READ(LP_AON_SYS_CFG_REG) | LP_AON_FORCE_DOWNLOAD_BOOT);
+#endif
+   esp_restart();
+}
+
+// test if a byte/command is set via serial to enter deploy mode or bootloader
 void testModeCheck() {
-   if (getActivatedFromMem()) return;  // skip test scan in real activated device
    delay(15);
    Serial.printf("%s", "[MAIN] test mode check...\n");  // important, this triggers test start
-   delay(40);
-   int incomingByte = Serial.read();  // read the incoming byte:
-   if (incomingByte == 84) {
-      isTestMode = true;
-      Serial.printf("%s", "[MAIN] test mode set!\n");
-      EepromClear();
+   delay(60);
+
+   if (Serial.available()) {
+      int incomingByte = Serial.read();
+      // 'B' (66) or 'b' (98): Trigger ROM download bootloader immediately
+      if (incomingByte == 66 || incomingByte == 98) {
+         Serial.println("[MAIN] Bootloader command 'B' received via Serial!");
+         rebootIntoRomBootloader();
+         return;
+      }
+      // 'T' (84): Standard deploy / test mode check
+      if (incomingByte == 84) {
+         isTestMode = true;
+         Serial.printf("%s", "[MAIN] test mode set!\n");
+         EepromClear();
+         return;
+      }
    } else {
       Serial.printf("%s", "[MAIN] test mode skipped.\n");
    }
