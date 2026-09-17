@@ -37,6 +37,29 @@ except ImportError:
     ClientError = Exception
 
 
+def _load_env():
+    possible_paths = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
+        os.path.expanduser("~/.paperlesspaper.env"),
+        os.path.expanduser("~/.env")
+    ]
+    for env_path in possible_paths:
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k, v = k.strip(), v.strip().strip('"\'')
+                            if k not in os.environ:
+                                os.environ[k] = v
+            except Exception:
+                pass
+
+_load_env()
+
+
 def get_dynamodb_resource(region=None):
     if boto3 is None:
         raise RuntimeError("Das Modul 'boto3' ist nicht installiert. Bitte 'pip install boto3' ausführen.")
