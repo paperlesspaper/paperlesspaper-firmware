@@ -119,6 +119,9 @@ python -m testbench.run_testbench --target epd13 -v
 # Alle angeschlossenen Geräte
 python -m testbench.run_testbench --target all -v
 
+# Mit lokaler Firmware-Binärdatei testen (ohne S3/CI-Artefakt)
+python -m testbench.run_testbench --target epd7 --candidate-bin .pio/build/epd7/firmware.bin -v
+
 # Optional inkl. zeitintensiver OTA-Firmware-Update-Tests
 python -m testbench.run_testbench --target epd7 --run-ota -v
 ```
@@ -127,6 +130,55 @@ python -m testbench.run_testbench --target epd7 --run-ota -v
 ```powershell
 python -m pytest testbench/test_epd_lifecycle.py -k "TestEPD7Lifecycle" -s -v
 ```
+
+### 7. CLI-Optionen im Überblick (`run_testbench.py`)
+
+| Parameter | Beschreibung |
+| :--- | :--- |
+| `--target epd7\|epd13\|all` | Test-Zielgerät auswählen (Standard: `all`). |
+| `--candidate-bin <Pfad>` | Pfad zu einer lokalen `.bin` Firmware-Datei für den Test. |
+| `--run-ota` | Führt zusätzlich die zeitintensiven OTA-Update-Tests (Test 02 & 03) aus. |
+| `--test-ble` | Führt nur Factory-Reset und BLE-WLAN-Provisionierung aus. |
+| `--factory-reset` | Führt isoliert einen 6x Power-Cycle Factory-Reset durch. |
+| `--verify` / `--auto-detect` | Schaltet Relais durch und kalibriert die Hardware-Zuordnung neu. |
+| `--skip-check` | Überspringt die Vorab-Hardwareprüfung (für schnelle Iterationen). |
+| `--list-ports` | Listet alle erkannten CP210x-Displays und CH340-Relais auf. |
+| `--junitxml <Pfad>` | Exportiert Testergebnisse als JUnit-XML-Protokoll. |
+| `-v` / `--verbose` | Ausführliche PyTest-Ausgabe mit Live-Logs. |
+
+### 8. Standalone BLE-Tools (`ble_provisioner.py`)
+```powershell
+# BLE-Geräte in Funkreichweite scannen
+python -m testbench.ble_provisioner --scan
+
+# Vom Display empfangene WLAN-Netze via BLE auslesen
+python -m testbench.ble_provisioner --target epd7 --read-scan
+
+# WLAN-Zugangsdaten manuell per BLE übertragen
+python -m testbench.ble_provisioner --target epd7 --ssid "MeinWLAN" --password "Geheim"
+```
+
+---
+
+## 🛡️ Phase 3: Canary Rollout & Flotten-Monitoring
+
+Nach erfolgreichem HIL-Hardwaretest können Firmware-Releases kontrolliert auf echte Kundengeräte ausgerollt und überwacht werden.
+
+### CLI-Befehle (`tools/`)
+
+```powershell
+# 1. Canary OTA URL auf Zielgeräte setzen & überwachen (automatische dev/pre URL nach Branch)
+python tools/select_pilot_devices.py --device-ids "epd7-xxxx,epd13-yyyy" --deploy --apply --confirm-ota I_CONFIRM_CANARY_OTA
+
+# 2. Canary Health Gate Monitor starten (Adoption, Reboot-Loops, Dead Devices prüfen)
+python tools/canary_monitor.py --device-ids "epd7-xxxx,epd13-yyyy" --watch --interval 30 --timeout 600
+
+# 3. Rollback auf reguläre Hauptversion (main/production) bei Problemen
+python tools/select_pilot_devices.py --device-ids "epd7-xxxx,epd13-yyyy" --reset --apply --confirm-ota I_CONFIRM_CANARY_OTA
+python tools/canary_monitor.py --device-ids "epd7-xxxx,epd13-yyyy" --reset --watch
+```
+
+*Hinweis: Credentials werden automatisch aus der lokalen `.env` geladen. Ohne `--apply` laufen die Tools als sicherer Dry-Run.*
 
 ---
 
@@ -145,9 +197,16 @@ python -m pytest testbench/test_epd_lifecycle.py -k "TestEPD7Lifecycle" -s -v
 
 ---
 
-## 🤖 CI/CD & GitHub Actions Pipeline
+## 🤖 CI/CD & GitHub Actions Workflows
 
-Die HIL-Testsuite ist vollständig in die kontinuierliche Build- & Deployment-Pipeline ([`.github/workflows/dev.yml`](file:///c:/WSL/paperlesspaper-firmware/.github/workflows/dev.yml)) sowie in den manuellen Test-Workflow ([`.github/workflows/hil-test.yml`](file:///c:/WSL/paperlesspaper-firmware/.github/workflows/hil-test.yml)) integriert.
+Die Test- und Rollout-Prozesse sind in drei aufeinander abgestimmte GitHub Actions Workflows organisiert:
+
+1. **[`dev.yml`](file:///c:/WSL/paperlesspaper-firmware/.github/workflows/dev.yml) (Automatischer Pipeline-Run auf `paper-l`):**
+   Vollständige Pipeline: KI-Risikoanalyse -> Matrix-Build -> HIL-Hardware-Gating (EPD7 & EPD13) -> S3-Deployment (`dev`) -> Testprotokoll & Release-Bewertung.
+2. **[`hil-test.yml`](file:///c:/WSL/paperlesspaper-firmware/.github/workflows/hil-test.yml) (Manueller Hardware-Test on Demand):**
+   Führt den HIL-Hardwaretest isoliert für `epd7`, `epd13` oder `all` auf dem Windows-Runner aus (inkl. optionalem OTA-Flag, ohne automatisches Deployment).
+3. **[`canary-health-gate.yml`](file:///c:/WSL/paperlesspaper-firmware/.github/workflows/canary-health-gate.yml) (Phase 3: Flotten-Rollout & Health-Gate):**
+   Kontrolliertes Ausrollen (`deploy`), Live-Überwachung (`monitor`) oder Rollback auf reguläre Hauptversion (`reset`) für definierte Kundengeräte.
 
 ### Pipeline-Architektur (`dev.yml`)
 
