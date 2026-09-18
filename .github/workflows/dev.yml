@@ -322,6 +322,7 @@ jobs:
         env:
           FW_VERSION: ${{ env.FW_VERSION }}
           DEPLOY_STATUS: ${{ needs.deploy.result }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           risk_arg=""
           [ -f "risk_artifacts/risk_report.md" ] && risk_arg="--risk-report risk_artifacts/risk_report.md"

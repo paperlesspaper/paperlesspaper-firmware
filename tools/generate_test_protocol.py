@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 tools/generate_test_protocol.py
-Aggregiert HIL-Testergebnisse (JUnit XML) für EPD7 und EPD13, den Deployment-Status
-und die KI-Risikoanalyse zu einem strukturierten Testprotokoll.
+Aggregiert HIL-Testergebnisse (JUnit XML) für EPD7 und EPD13, den Deployment-Status,
+die KI-Risikoanalyse sowie automatisierte KI-Fehlerursachenanalysen (RCA).
 Schreibt die Zusammenfassung in $GITHUB_STEP_SUMMARY, erzeugt ein Markdown-Artefakt
 für den Pull Request und ein JSON-Artefakt für automatische CI-Bots.
 """
@@ -22,6 +22,8 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+from tools.ai_failure_analysis import sanitize_log, analyze_failure
 
 PHASE_TITLES = {
     "test_00": "Phase 0: Factory-Reset (6x Power-Cycles)",
@@ -104,12 +106,13 @@ def parse_junit_xml(xml_path):
     }
 
 def load_risk_report(report_path):
-    """Liest die KI-Risikoanalyse ein und extrahiert Ampelbewertung und Empfehlung."""
+    """Liest die KI-Risikoanalyse ein und extrahiert Ampelbewertung, Empfehlung und Kurzzusammenfassung."""
     if not report_path or not os.path.isfile(report_path):
         return {
             "available": False,
             "rating": "UNBEKANNT",
             "recommendation": "KEINE ANALYSE VORHANDEN",
+            "diff_summary": "",
             "raw_text": "Keine KI-Risikoanalyse verfügbar."
         }
 
@@ -129,10 +132,17 @@ def load_risk_report(report_path):
         elif "MANUELLE PRÜFUNG" in content:
             recommendation = "MANUELLE PRÜFUNG EMPFOHLEN"
 
+        # Kurzzusammenfassung der Code-Änderungen (Abschnitt 1) extrahieren
+        diff_summary = ""
+        m = re.search(r"### 1\.\s*🔍\s*Bewertung der aktuellen Code-Änderungen.*?\n(.*?)(?=\n---\n|\n### 2|\Z)", content, re.DOTALL)
+        if m:
+            diff_summary = m.group(1).strip()
+
         return {
             "available": True,
             "rating": rating,
             "recommendation": recommendation,
+            "diff_summary": diff_summary,
             "raw_text": content
         }
     except Exception as e:
@@ -140,6 +150,7 @@ def load_risk_report(report_path):
             "available": False,
             "rating": "FEHLER",
             "recommendation": f"Fehler beim Einlesen: {e}",
+            "diff_summary": "",
             "raw_text": ""
         }
 
@@ -220,13 +231,50 @@ def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_da
         risk_icon = "🔴 Hoch"
     elif "MITTEL" in risk_data.get("rating", ""):
         risk_icon = "🟡 Mittel"
-    lines.append(f"| **KI-Risikoanalyse (Gemini)** | {risk_icon} | {risk_data.get('rating', 'Unbekannt')} – {risk_data.get('recommendation', '')} |")
-    lines.append("")
-    lines.append("---")
+    lines.append(f"| **KI-Risikoanalyse (Pre-Flight)** | {risk_icon} | {risk_data.get('rating', 'Unbekannt')} – {risk_data.get('recommendation', '')} |")
     lines.append("")
 
-    # 2. Detaillierte Hardware-Testergebnisse EPD7
+    # 2. KI Fehlerdiagnose bei Fehlern (Root Cause Analysis)
+    failed_cases = []
+    for data, target_name in [(epd7_data, "EPD7"), (epd13_data, "EPD13")]:
+        if data and data.get("cases"):
+            for tc in data["cases"]:
+                if tc["status"] in ("FAILED", "ERROR"):
+                    failed_cases.append((target_name, tc))
+
+    if failed_cases:
+        lines.append("---")
+        lines.append("")
+        lines.append("## 🚨 Fehlgeschlagene Tests & 🤖 KI-Fehlerursachenanalyse")
+        lines.append("")
+        for target_name, tc in failed_cases:
+            diag = tc.get("ai_diagnosis")
+            if not diag:
+                print(f"🤖 Führe KI-Fehlerursachenanalyse durch für [{target_name}] {tc['name']}...")
+                diag = analyze_failure(tc["name"], tc["phase"], tc["message"])
+                tc["ai_diagnosis"] = diag
+
+            lines.append(f"### ❌ [{target_name}] {tc['phase']}")
+            lines.append(f"- **Testfall:** `{tc['name']}` | **Dauer:** {tc['duration']}s | **Status:** `{tc['status']}`")
+            lines.append("")
+
+            short_err = sanitize_log(tc["message"])
+            if len(short_err) > 600:
+                short_err = short_err[:600] + "\n[... gekürzt ...]"
+            lines.append(f"**Fehlerauszug (bereinigt):**\n```text\n{short_err}\n```")
+            lines.append("")
+            lines.append("<details open>")
+            lines.append("<summary>🤖 <b>KI-Fehlerdiagnose & Handlungsempfehlung (Gemini Flash RCA)</b></summary>")
+            lines.append("")
+            lines.append(diag)
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+
+    # 3. Detaillierte Hardware-Testergebnisse EPD7
     if epd7_data and epd7_data.get("cases"):
+        lines.append("---")
+        lines.append("")
         lines.append("## 📺 Detailergebnisse: EPD7 (7.5\" Display)")
         lines.append("")
         lines.append("| Testphase | Status | Dauer | Bemerkung |")
@@ -237,8 +285,10 @@ def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_da
             lines.append(f"| {tc['phase']} | {icon} `{tc['status']}` | {tc['duration']}s | {note} |")
         lines.append("")
 
-    # 3. Detaillierte Hardware-Testergebnisse EPD13
+    # 4. Detaillierte Hardware-Testergebnisse EPD13
     if epd13_data and epd13_data.get("cases"):
+        lines.append("---")
+        lines.append("")
         lines.append("## 📺 Detailergebnisse: EPD13 (13.3\" Display)")
         lines.append("")
         lines.append("| Testphase | Status | Dauer | Bemerkung |")
@@ -249,14 +299,28 @@ def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_da
             lines.append(f"| {tc['phase']} | {icon} `{tc['status']}` | {tc['duration']}s | {note} |")
         lines.append("")
 
-    # 4. KI Risikoanalyse
+    # 5. KI Risikoanalyse (Kompakte Zusammenfassung + Ausklappbarer Vollbericht)
     if risk_data.get("available"):
         lines.append("---")
         lines.append("")
-        lines.append("## 🛡️ KI-Firmware Risikoanalyse Zusammenfassung")
+        lines.append("## 🛡️ Pre-Flight KI-Risikoanalyse (Zusammenfassung)")
         lines.append("")
-        lines.append(risk_data.get("raw_text", ""))
-        lines.append("")
+        lines.append(f"- **Gesamtbewertung:** {risk_data.get('rating', 'Unbekannt')}")
+        lines.append(f"- **Release-Empfehlung:** {risk_data.get('recommendation', 'Unbekannt')}")
+        if risk_data.get("diff_summary"):
+            lines.append("")
+            lines.append("**Kernaussage zu den Code-Änderungen:**")
+            lines.append(risk_data["diff_summary"])
+            lines.append("")
+
+        if risk_data.get("raw_text"):
+            lines.append("<details>")
+            lines.append("<summary>🔍 <b>Vollständigen Pre-Flight Audit-Bericht anzeigen</b></summary>")
+            lines.append("")
+            lines.append(risk_data["raw_text"])
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -314,6 +378,19 @@ def main():
     # Als strukturierte JSON-Datei speichern (für automatische PR-Bots)
     if args.output_json:
         try:
+            # Sammle etwaige Fehlerdiagnosen für JSON
+            diagnostics = []
+            for data, target_name in [(epd7_data, "EPD7"), (epd13_data, "EPD13")]:
+                if data and data.get("cases"):
+                    for tc in data["cases"]:
+                        if tc.get("ai_diagnosis"):
+                            diagnostics.append({
+                                "target": target_name,
+                                "test": tc["name"],
+                                "phase": tc["phase"],
+                                "diagnosis": tc["ai_diagnosis"]
+                            })
+
             json_payload = {
                 "version": args.fw_version,
                 "commit": args.commit_sha,
@@ -325,6 +402,7 @@ def main():
                 },
                 "epd7": epd7_data,
                 "epd13": epd13_data,
+                "ai_failure_diagnostics": diagnostics,
                 "overall_success": not (
                     (epd7_data and epd7_data["failed"] > 0) or
                     (epd13_data and epd13_data["failed"] > 0) or
