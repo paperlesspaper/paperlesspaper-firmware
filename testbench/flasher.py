@@ -66,13 +66,13 @@ def fetch_production_firmware(manifest_url, cache_dir=None):
     target_path = os.path.join(cache_dir, f"{os.path.splitext(filename)[0]}_{prod_version}.bin")
 
     if os.path.isfile(target_path):
-        print(f"ℹ️ Produktions-Firmware V{prod_version} bereits im Cache vorhanden: {target_path}")
+        print(f"ℹ️ Produktions-Firmware V{prod_version} bereits vorhanden.")
         return target_path, prod_version
 
-    print(f"⬇️ Lade aktuelle Produktions-Firmware V{prod_version} herunter: {bin_url}...")
+    print(f"⬇️ Lade aktuelle Produktions-Firmware V{prod_version} herunter...")
     try:
         urllib.request.urlretrieve(bin_url, target_path)
-        print(f"✅ Download abgeschlossen: {target_path} ({os.path.getsize(target_path):,} Bytes)")
+        print(f"✅ Download abgeschlossen: V{prod_version} ({os.path.getsize(target_path):,} Bytes)")
         return target_path, prod_version
     except Exception as e:
         raise RuntimeError(f"Download der Produktions-Firmware fehlgeschlagen ({bin_url}): {e}")

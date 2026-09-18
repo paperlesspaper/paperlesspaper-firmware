@@ -24,7 +24,7 @@ except ImportError:
 
 from .hardware_controller import ESP32HardwareController, HardwareSetupError
 from . import config
-from .privacy import mask_uid, register_github_mask
+from .privacy import mask_uid, mask_path, register_github_mask
 
 def print_banner():
     register_github_mask(config.EPD7_DEVICE_ID)
@@ -160,7 +160,8 @@ def main():
     if args.junitxml:
         pytest_args.append(f"--junitxml={args.junitxml}")
 
-    print(f"🚀 Starte PyTest mit Argumenten: {pytest_args}\n")
+    clean_pytest_args = [mask_path(a) for a in pytest_args]
+    print(f"🚀 Starte PyTest mit Argumenten: {clean_pytest_args}\n")
     exit_code = pytest.main(pytest_args)
 
     print("=" * 65)

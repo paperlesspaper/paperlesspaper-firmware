@@ -57,9 +57,8 @@ class AWSTestVerifier:
         if os.path.isfile(self.token_cache_file):
             try:
                 os.remove(self.token_cache_file)
-                print("🗑️ Auth0-Token-Cache auf der Festplatte invalidiert.")
-            except Exception as e:
-                print(f"⚠️ Konnte {self.token_cache_file} nicht löschen: {e}")
+            except Exception:
+                pass
 
     def get_auth0_token(self):
         """
@@ -84,12 +83,9 @@ class AWSTestVerifier:
                 if cached_token and now < (expires_at - 300):
                     self._cached_auth0_token = cached_token
                     self._token_expiry = expires_at - 60
-                    exp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires_at))
-                    remaining_days = round((expires_at - now) / 86400, 1)
-                    print(f"📦 Verwende gecachtes Auth0 Bearer-Token (gültig bis {exp_str} / ~{remaining_days} Tage).")
                     return cached_token
-            except Exception as e:
-                print(f"⚠️ Konnte Auth0-Cache-Datei nicht laden ({e}), fordere neues Token an.")
+            except Exception:
+                pass
 
         # 3. Neues Token von Auth0 beziehen
         if requests is None:
@@ -118,7 +114,6 @@ class AWSTestVerifier:
             "grant_type": grant_type
         }
 
-        print(f"🔑 Fordere neues Auth0 Bearer-Token an von {domain}...")
         resp = requests.post(token_url, json=payload, timeout=10)
         if resp.status_code != 200:
             raise RuntimeError(f"Auth0 Token-Anfrage fehlgeschlagen (Status {resp.status_code}): {resp.text}")
@@ -134,7 +129,7 @@ class AWSTestVerifier:
         self._cached_auth0_token = token
         self._token_expiry = expires_at - 60
 
-        # Disk-Cache speichern
+        # Disk-Cache speichern (ohne Logausgabe)
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
             with open(self.token_cache_file, "w", encoding="utf-8") as f:
@@ -143,11 +138,9 @@ class AWSTestVerifier:
                     "expires_at": expires_at,
                     "cached_at": now
                 }, f, indent=2)
-            print(f"💾 Auth0-Token erfolgreich im Disk-Cache gespeichert: {mask_path(self.token_cache_file)}")
-        except Exception as e:
-            print(f"⚠️ Konnte Auth0-Token nicht im Disk-Cache speichern: {e}")
+        except Exception:
+            pass
 
-        print(f"✅ Auth0 Token erfolgreich erhalten (Gültigkeit: {expires_in}s / {round(expires_in/86400, 1)} Tage).")
         return token
 
     def _get_api_headers(self):

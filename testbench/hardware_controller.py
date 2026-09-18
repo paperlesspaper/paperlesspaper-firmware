@@ -616,9 +616,8 @@ class ESP32HardwareController:
             try:
                 with open(cache_file, "w", encoding="utf-8") as f:
                     json.dump(paired, f, indent=2)
-                print(f"💾 Zuordnungs-Cache aktualisiert: {cache_file}")
-            except Exception as e:
-                print(f"⚠️ Konnte hardware_mapping.json nicht speichern: {e}")
+            except Exception:
+                pass
 
         return paired
 
