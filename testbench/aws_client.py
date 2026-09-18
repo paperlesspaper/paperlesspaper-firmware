@@ -14,6 +14,7 @@ import urllib.parse
 import boto3
 from botocore.exceptions import ClientError
 from . import config
+from .privacy import mask_uid, mask_s3_key, mask_topic, mask_path, sanitize_log_line, register_github_mask
 
 try:
     import requests
@@ -142,7 +143,7 @@ class AWSTestVerifier:
                     "expires_at": expires_at,
                     "cached_at": now
                 }, f, indent=2)
-            print(f"💾 Auth0-Token erfolgreich im Disk-Cache gespeichert: {self.token_cache_file}")
+            print(f"💾 Auth0-Token erfolgreich im Disk-Cache gespeichert: {mask_path(self.token_cache_file)}")
         except Exception as e:
             print(f"⚠️ Konnte Auth0-Token nicht im Disk-Cache speichern: {e}")
 
@@ -192,7 +193,9 @@ class AWSTestVerifier:
             raise ValueError("HIL_API_BASE_URL ist nicht gesetzt! Bitte in .env oder Umgebungsvariablen definieren.")
 
         target_name = device_id if device_id.startswith(("epd7-", "epd13-")) else f"epd7-{device_id}"
-        print(f"📡 Rufe Aktivierungs-API auf für '{target_name}' (POST /activatedevice)...")
+        register_github_mask(target_name)
+        register_github_mask(device_id)
+        print(f"📡 Rufe Aktivierungs-API auf für '{mask_uid(target_name)}' (POST /activatedevice)...")
 
         headers = self._get_api_headers()
         payload = {
@@ -215,7 +218,7 @@ class AWSTestVerifier:
     def wait_for_activation(self, device_id, timeout=30):
         """Wartet, bis das Gerät in DynamoDB iotCatalog als aktiviert bestätigt ist."""
         start = time.time()
-        print(f"⏳ Warte auf DynamoDB-Aktivierung von '{device_id}' (Timeout: {timeout}s)...")
+        print(f"⏳ Warte auf DynamoDB-Aktivierung von '{mask_uid(device_id)}' (Timeout: {timeout}s)...")
 
         while (time.time() - start) < timeout:
             item = self.get_device_status(device_id)
@@ -224,11 +227,11 @@ class AWSTestVerifier:
                 is_active = item.get("activated", False)
                 if status in ("activated", "active") or is_active is True:
                     elapsed = round(time.time() - start, 2)
-                    print(f"✅ Gerät '{device_id}' in DynamoDB als aktiv bestätigt ({elapsed}s).")
+                    print(f"✅ Gerät '{mask_uid(device_id)}' in DynamoDB als aktiv bestätigt ({elapsed}s).")
                     return item
             time.sleep(2)
 
-        raise TimeoutError(f"Gerät '{device_id}' wurde nicht innerhalb von {timeout}s in DynamoDB aktiviert!")
+        raise TimeoutError(f"Gerät '{mask_uid(device_id)}' wurde nicht innerhalb von {timeout}s in DynamoDB aktiviert!")
 
     def generate_test_image(self, width=800, height=480, label="HIL TEST IMAGE"):
         """
@@ -297,7 +300,9 @@ class AWSTestVerifier:
             raise ValueError("HIL_API_BASE_URL ist nicht gesetzt! Bitte in .env oder Umgebungsvariablen definieren.")
 
         target_name = device_id if device_id.startswith(("epd7-", "epd13-")) else f"epd7-{device_id}"
-        print(f"📡 Fordere Presigned Upload-URL an über REST-API (POST /uploads für '{target_name}')...")
+        register_github_mask(target_name)
+        register_github_mask(device_id)
+        print(f"📡 Fordere Presigned Upload-URL an über REST-API (POST /uploads für '{mask_uid(target_name)}')...")
 
         headers = self._get_api_headers()
         payload = {"deviceName": target_name}
@@ -320,7 +325,7 @@ class AWSTestVerifier:
         if not self.s3_bucket:
             self.s3_bucket = self._extract_bucket_from_url(upload_url) or ""
 
-        print(f"✅ Presigned Upload-URL erfolgreich über API erhalten: {key}")
+        print(f"✅ Presigned Upload-URL erfolgreich über API erhalten: {mask_s3_key(key)}")
         return upload_url, key
 
     def upload_image_via_signed_url(self, upload_url, image_bytes):
@@ -407,7 +412,7 @@ class AWSTestVerifier:
         """
         start = time.time()
         min_ts = (min_timestamp or int(time.time())) * 1000 - 15000  # ms mit Puffer
-        print(f"⏳ Warte auf Quittierungs-Payload in DynamoDB iotPayload für '{device_id}' (Timeout: {timeout}s)...")
+        print(f"⏳ Warte auf Quittierungs-Payload in DynamoDB iotPayload für '{mask_uid(device_id)}' (Timeout: {timeout}s)...")
 
         dev_candidates = [str(device_id)]
         if not device_id.startswith(("epd7-", "epd13-")):
@@ -433,10 +438,11 @@ class AWSTestVerifier:
                             status = str(it.get("status", ""))
                             if "update" in ev_type.lower() or "update_ok" in msg or "ok" in status.lower() or "activate" in ev_type.lower():
                                 elapsed = round(time.time() - start, 2)
-                                print(f"✅ Quittierungs-Payload in DynamoDB iotPayload verifiziert ({elapsed}s): Typ={ev_type}, Message={msg}")
+                                clean_msg = sanitize_log_line(msg)
+                                print(f"✅ Quittierungs-Payload in DynamoDB iotPayload verifiziert ({elapsed}s): Typ={ev_type}, Message={clean_msg}")
                                 return it
                 except ClientError as e:
-                    print(f"⚠️ DynamoDB iotPayload Query Warnung für {cand}: {e}")
+                    print(f"⚠️ DynamoDB iotPayload Query Warnung für {mask_uid(cand)}: {e}")
 
             time.sleep(2)
 
@@ -534,11 +540,11 @@ class AWSTestVerifier:
                     shadowName="settings",
                     payload=json.dumps(shadow_payload)
                 )
-                print(f"📡 [OTA] Shadow 'settings.otaUrl' für '{thing}' gesetzt: {ota_url}")
+                print(f"📡 [OTA] Shadow 'settings.otaUrl' für '{mask_uid(thing)}' gesetzt: {ota_url}")
             except ClientError as e:
                 err_code = e.response.get("Error", {}).get("Code")
                 if err_code != "ResourceNotFoundException" or thing == thing_candidates[-1]:
-                    print(f"⚠️ Warnung beim Setzen des IoT Shadows für {thing}: {e}")
+                    print(f"⚠️ Warnung beim Setzen des IoT Shadows für {mask_uid(thing)}: {e}")
                     last_error = e
 
             # 2. Direkt per MQTT an epaper/receive publishen (falls Gerät bereits online/wach ist)
@@ -550,7 +556,7 @@ class AWSTestVerifier:
                     qos=1,
                     payload=mqtt_payload
                 )
-                print(f"📡 [OTA] MQTT-Nachricht auf '{mqtt_topic}' gesendet: {mqtt_payload}")
+                print(f"📡 [OTA] MQTT-Nachricht auf '{mask_topic(mqtt_topic)}' gesendet: {mqtt_payload}")
                 return True
             except ClientError as e:
                 print(f"⚠️ Fehler beim MQTT-Publish auf {mqtt_topic}: {e}")

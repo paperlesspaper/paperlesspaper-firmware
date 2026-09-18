@@ -23,7 +23,17 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from tools.ai_failure_analysis import sanitize_log, analyze_failure
+# Stelle sicher, dass Repo-Root und tools-Verzeichnis im sys.path sind (für CI/CD Runner)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+for _p in (_REPO_ROOT, _SCRIPT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+try:
+    from tools.ai_failure_analysis import sanitize_log, analyze_failure
+except ImportError:
+    from ai_failure_analysis import sanitize_log, analyze_failure
 
 PHASE_TITLES = {
     "test_00": "Phase 0: Factory-Reset (6x Power-Cycles)",

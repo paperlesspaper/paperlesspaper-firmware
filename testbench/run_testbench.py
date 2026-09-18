@@ -24,14 +24,17 @@ except ImportError:
 
 from .hardware_controller import ESP32HardwareController, HardwareSetupError
 from . import config
+from .privacy import mask_uid, register_github_mask
 
 def print_banner():
+    register_github_mask(config.EPD7_DEVICE_ID)
+    register_github_mask(config.EPD13_DEVICE_ID)
     print("=" * 65)
     print("🔬 HARDWARE-IN-THE-LOOP (HIL) TESTBENCH RUNNER")
     print("=" * 65)
     print("Hardware-Konfiguration:")
-    print(f"  - EPD7:  Display={config.EPD7_COM_PORT} | Relais={config.EPD7_RELAY_PORT} | UID={config.EPD7_DEVICE_ID}")
-    print(f"  - EPD13: Display={config.EPD13_COM_PORT} | Relais={config.EPD13_RELAY_PORT} | UID={config.EPD13_DEVICE_ID}")
+    print(f"  - EPD7:  Display={config.EPD7_COM_PORT} | Relais={config.EPD7_RELAY_PORT} | UID={mask_uid(config.EPD7_DEVICE_ID)}")
+    print(f"  - EPD13: Display={config.EPD13_COM_PORT} | Relais={config.EPD13_RELAY_PORT} | UID={mask_uid(config.EPD13_DEVICE_ID)}")
     print(f"  - Reset-Methode: {config.RESET_METHOD}")
     print("=" * 65)
 

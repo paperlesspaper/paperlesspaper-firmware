@@ -26,6 +26,7 @@ except ImportError:
     BLEAK_AVAILABLE = False
 
 from . import config
+from .privacy import mask_uid, mask_mac, mask_ssid, register_github_mask
 
 class BLEProvisioningError(RuntimeError):
     """Wird ausgelöst, wenn die BLE-Übertragung fehlschlägt."""
@@ -69,7 +70,7 @@ class BLEProvisioner:
             raise RuntimeError("'bleak' ist nicht installiert.")
 
         target = device_name_or_uid.lower().strip()
-        print(f"🔍 [BLE] Scanne nach Bluetooth-Gerät '{device_name_or_uid}' (Timeout: {timeout}s)...")
+        print(f"🔍 [BLE] Scanne nach Bluetooth-Gerät '{mask_uid(device_name_or_uid)}' (Timeout: {timeout}s)...")
         start_t = time.time()
         
         while (time.time() - start_t) < timeout:
@@ -78,7 +79,9 @@ class BLEProvisioner:
                 d_name = (d.name or "").lower().strip()
                 d_addr = d.address.lower().strip()
                 if target in d_name or target in d_addr:
-                    print(f"🎯 [BLE] Gerät gefunden: {d.name} [{d.address}]")
+                    register_github_mask(d.name)
+                    register_github_mask(d.address)
+                    print(f"🎯 [BLE] Gerät gefunden: {mask_uid(d.name)} [{mask_mac(d.address)}]")
                     return d
             await asyncio.sleep(0.5)
 
@@ -101,20 +104,23 @@ class BLEProvisioner:
         if not ssid:
             raise ValueError("Keine WLAN-SSID für die BLE-Provisionierung angegeben.")
 
+        register_github_mask(ssid)
+        register_github_mask(password)
+
         device = await cls.async_find_device(device_name_or_uid, timeout=timeout)
         if not device:
             raise BLEProvisioningError(
-                f"❌ BLE-Gerät '{device_name_or_uid}' nicht gefunden! "
+                f"❌ BLE-Gerät '{mask_uid(device_name_or_uid)}' nicht gefunden! "
                 "Ist das Display im BLE-Advertising-Modus ([BLE] BLE Advertising started)?"
             )
 
-        print(f"🔗 [BLE] Verbinde mit {device.name} ({device.address})...")
+        print(f"🔗 [BLE] Verbinde mit {mask_uid(device.name)} ({mask_mac(device.address)})...")
         async with BleakClient(device, timeout=25.0) as client:
             if not client.is_connected:
-                raise BLEProvisioningError(f"Konnte keine BLE-Verbindung zu {device.name} aufbauen.")
+                raise BLEProvisioningError(f"Konnte keine BLE-Verbindung zu {mask_uid(device.name)} aufbauen.")
 
             print(f"✅ [BLE] Verbunden. Übertrage WLAN-Zugangsdaten...")
-            print(f"   ➔ SSID: {ssid}")
+            print(f"   ➔ SSID: {mask_ssid(ssid)}")
             await client.write_gatt_char(config.BLE_CHAR_WIFI_SSID, ssid.encode("utf-8"), response=True)
             await asyncio.sleep(0.3)
 
@@ -122,7 +128,7 @@ class BLEProvisioner:
             await client.write_gatt_char(config.BLE_CHAR_WIFI_PASSWORD, password.encode("utf-8"), response=True)
             await asyncio.sleep(0.5)
 
-            print(f"🎉 [BLE] WLAN-Credentials an {device.name} übermittelt.")
+            print(f"🎉 [BLE] WLAN-Credentials an {mask_uid(device.name)} übermittelt.")
             print(f"⏳ [BLE] Warte auf Verbindungsüberprüfung durch das Display (max. 10s)...")
 
             # Das Display versucht nun bis zu 10s die Verbindung herzustellen.
@@ -143,11 +149,11 @@ class BLEProvisioner:
 
             if not connection_confirmed:
                 raise BLEProvisioningError(
-                    f"❌ WLAN-Verbindung zu '{ssid}' fehlgeschlagen! "
+                    f"❌ WLAN-Verbindung zu '{mask_ssid(ssid)}' fehlgeschlagen! "
                     "Das Display hat die Verbindung innerhalb von 12s nicht bestätigt."
                 )
 
-            print(f"✅ [BLE] WLAN-Verbindung zu '{ssid}' erfolgreich vom Display bestätigt!")
+            print(f"✅ [BLE] WLAN-Verbindung zu '{mask_ssid(ssid)}' erfolgreich vom Display bestätigt!")
             return True
 
     @classmethod

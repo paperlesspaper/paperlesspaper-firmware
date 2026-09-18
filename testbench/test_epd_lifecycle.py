@@ -13,6 +13,7 @@ from .hardware_controller import ESP32HardwareController
 from .ble_provisioner import BLEProvisioner
 from .flasher import fetch_production_firmware
 from .aws_client import AWSTestVerifier
+from .privacy import mask_uid, mask_mac, mask_ssid, sanitize_log_line, register_github_mask
 
 def ensure_wifi_connected(device, device_id, timeout=45):
     """
@@ -50,6 +51,39 @@ def ensure_wifi_connected(device, device_id, timeout=45):
         time.sleep(1.0)
 
     raise TimeoutError(f"[{device.name}] Timeout ({timeout}s) beim Warten auf WLAN-Verbindung!")
+
+def trigger_ota_with_retry(device, aws_verifier, device_id, ota_url, pattern, retries=2, timeout_per_try=20):
+    """
+    Triggert OTA via AWS IoT Shadow & MQTT ($aws/things/<device_id>/epaper/receive)
+    und wartet auf das Bestätigungs-Event.
+    Läuft das Warten ins Timeout (z. B. durch Paketverlust oder temporäre MQTT-Verbindungspause),
+    wird die MQTT-Nachricht automatisch noch einmal gesendet und geprüft (Retry).
+    """
+    last_error = None
+    for attempt in range(1, retries + 1):
+        if attempt == 1:
+            print(f"\n📡 [{device.name}] Triggere OTA via MQTT ('{ota_url}')...")
+        else:
+            print(f"\n🔄 [{device.name}] OTA Retry ({attempt}/{retries}): Sende MQTT-Befehl erneut an '{mask_uid(device_id)}'...")
+            # Kurz prüfen, ob das Gerät evtl. gerade neu zu AWS verbindet
+            try:
+                device.wait_for_pattern(r"\[AWS\] CONNECTED", timeout=4)
+            except TimeoutError:
+                pass
+
+        aws_verifier.trigger_ota(device_id, ota_url)
+
+        try:
+            return device.wait_for_pattern(pattern, timeout=timeout_per_try)
+        except TimeoutError as e:
+            last_error = e
+            if attempt < retries:
+                recent = " | ".join([l.strip() for l in device.log_history[-3:]]) if device.log_history else "<keine Logs>"
+                print(f"⚠️ [{device.name}] Keine OTA-Reaktion nach {timeout_per_try}s (Logs: {recent}). Starte Retry in 2s...")
+                time.sleep(2)
+
+    print(f"❌ [{device.name}] OTA-Empfang auch nach {retries} Versuchen nicht eingetroffen.")
+    raise last_error
 
 @pytest.fixture(scope="module")
 def aws_verifier():
@@ -92,7 +126,8 @@ class TestEPD7Lifecycle:
                 self.device_id = info["uid"]
                 TestEPD7Lifecycle.device_id = info["uid"]
                 config.EPD7_DEVICE_ID = info["uid"]
-            print(f"🎉 [EPD7] Testgerät '{self.device_id}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
+            register_github_mask(self.device_id)
+            print(f"🎉 [EPD7] Testgerät '{mask_uid(self.device_id)}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
 
     def test_01_ble_wifi_provisioning(self, request):
         """Schritt 1: Simuliert die drahtlose BLE-Provisionierung von WLAN-Credentials an das frisch zurückgesetzte Display."""
@@ -101,18 +136,18 @@ class TestEPD7Lifecycle:
 
         try:
             with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
-                print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
+                print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{mask_uid(self.device_id)}'...")
                 device.wait_for_pattern(
                     r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
                     timeout=30
                 )
 
-            print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD7 (UID: {self.device_id})...")
+            print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD7 (UID: {mask_uid(self.device_id)})...")
             try:
                 nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
                 print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
-                for n in nets[:5]:
-                    print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+                for idx, n in enumerate(nets[:5], 1):
+                    print(f"   - WLAN-Netz #{idx} [maskiert] ({n.get('rssi', '')} dBm)")
             except Exception as e:
                 print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
 
@@ -122,8 +157,8 @@ class TestEPD7Lifecycle:
                 password=config.WIFI_PASSWORD,
                 timeout=25
             )
-            assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
-            print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")
+            assert success is True, f"WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
+            print(f"🎉 BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
         except Exception as exc:
             print(f"\n🛑 [EPD7] BLE-WLAN-Provisionierung fehlgeschlagen: {exc}")
             print("   ➔ Ohne WLAN-Verbindung können nachfolgende Tests (OTA, AWS, REST) nicht funktionieren.")
@@ -146,14 +181,15 @@ class TestEPD7Lifecycle:
                 device.reset(method="relay_hex")
                 device.wait_for_pattern(r"\[AWS\] CONNECTED", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
 
-            # 2. Jetzt, wo MQTT aktiv verbunden ist: Triggere OTA
-            print(f"\n📡 [EPD7] Triggere Produktions-OTA via Manifest '{self.manifest_url}' (erwartete Version: V{version})...")
-            aws_verifier.trigger_ota(self.device_id, self.manifest_url)
-
-            # 3. Warte auf OTA-Befehlsempfang
-            device.wait_for_pattern(
-                r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing Manifest JSON|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
-                timeout=20
+            # 2. & 3. Jetzt, wo MQTT aktiv verbunden ist: Triggere OTA mit automatischem Retry bei Timeout
+            trigger_ota_with_retry(
+                device=device,
+                aws_verifier=aws_verifier,
+                device_id=self.device_id,
+                ota_url=self.manifest_url,
+                pattern=r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing Manifest JSON|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
+                retries=2,
+                timeout_per_try=20
             )
 
             # 4. Warte auf den echten Neustart NACH dem Flashen (nur ab jetzt eintreffende Logs!)
@@ -186,14 +222,15 @@ class TestEPD7Lifecycle:
                     device.reset(method="relay_hex")
                     device.wait_for_pattern(r"\[AWS\] CONNECTED", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
 
-                # 2. Jetzt, wo MQTT aktiv verbunden ist: Triggere Kandidaten-OTA
-                print(f"\n📡 [EPD7] Triggere Kandidaten-OTA via Direkt-URL '{direct_url}'...")
-                aws_verifier.trigger_ota(self.device_id, direct_url)
-
-                # 3. Warte auf OTA-Befehlsempfang
-                device.wait_for_pattern(
-                    r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing direct binary URL|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
-                    timeout=20
+                # 2. & 3. Jetzt, wo MQTT aktiv verbunden ist: Triggere Kandidaten-OTA mit automatischem Retry bei Timeout
+                trigger_ota_with_retry(
+                    device=device,
+                    aws_verifier=aws_verifier,
+                    device_id=self.device_id,
+                    ota_url=direct_url,
+                    pattern=r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing direct binary URL|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
+                    retries=2,
+                    timeout_per_try=20
                 )
 
                 # 4. Warte auf den echten Neustart NACH dem Flashen (nur ab jetzt eintreffende Logs!)
@@ -214,7 +251,7 @@ class TestEPD7Lifecycle:
     def test_04_device_activation(self, aws_verifier):
         """Schritt 4: Aktiviert das Gerät über die REST-API (/activatedevice) und wartet auf autonomen Handshake des Geräts (ohne Relais-Reset)."""
         with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
-            print(f"\n🔑 [EPD7] Rufe Aktivierungs-API (POST /activatedevice) für '{self.device_id}' auf...")
+            print(f"\n🔑 [EPD7] Rufe Aktivierungs-API (POST /activatedevice) für '{mask_uid(self.device_id)}' auf...")
             aws_verifier.set_device_activation_pending(self.device_id)
 
             print(f"⏳ [EPD7] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
@@ -235,7 +272,7 @@ class TestEPD7Lifecycle:
 
     def test_05_picture_render_and_payload(self, aws_verifier):
         """Schritt 5: Lädt Testbild über Presigned URL hoch, prüft Download, Rendering und DynamoDB Quittung."""
-        print(f"\n🖼️ [EPD7] Generiere und lade Testbild für '{self.device_id}' hoch...")
+        print(f"\n🖼️ [EPD7] Generiere und lade Testbild für '{mask_uid(self.device_id)}' hoch...")
         key, t_upload = aws_verifier.upload_test_image(self.device_id, width=800, height=480)
 
         with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
@@ -260,7 +297,7 @@ class TestEPD7Lifecycle:
 
     def test_06_deactivate_and_deep_sleep(self, aws_verifier):
         """Schritt 6: Deaktiviert das Gerät über die REST-API (/activatedevice reset: True) und prüft Übergang in den Deep Sleep."""
-        print(f"\n🛑 [EPD7] Führe Deaktivierung über REST-API für '{self.device_id}' durch...")
+        print(f"\n🛑 [EPD7] Führe Deaktivierung über REST-API für '{mask_uid(self.device_id)}' durch...")
         aws_verifier.deactivate_device(self.device_id)
 
         with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
@@ -316,7 +353,8 @@ class TestEPD13Lifecycle:
                 self.device_id = info["uid"]
                 TestEPD13Lifecycle.device_id = info["uid"]
                 config.EPD13_DEVICE_ID = info["uid"]
-            print(f"🎉 [EPD13] Testgerät '{self.device_id}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
+            register_github_mask(self.device_id)
+            print(f"🎉 [EPD13] Testgerät '{mask_uid(self.device_id)}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
 
     def test_01_ble_wifi_provisioning(self, request):
         """Schritt 1: Simuliert die drahtlose BLE-Provisionierung von WLAN-Credentials an das frisch zurückgesetzte EPD13 Display."""
@@ -325,18 +363,18 @@ class TestEPD13Lifecycle:
 
         try:
             with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:
-                print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{self.device_id}'...")
+                print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{mask_uid(self.device_id)}'...")
                 device.wait_for_pattern(
                     r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
                     timeout=30
                 )
 
-            print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD13 (UID: {self.device_id})...")
+            print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD13 (UID: {mask_uid(self.device_id)})...")
             try:
                 nets = BLEProvisioner.read_wifi_scan(self.device_id, timeout=15)
                 print(f"📶 Vom Display gescannte WLAN-Netzwerke via BLE ({len(nets)}):")
-                for n in nets[:5]:
-                    print(f"   - {n['ssid']} ({n['rssi']} dBm)")
+                for idx, n in enumerate(nets[:5], 1):
+                    print(f"   - WLAN-Netz #{idx} [maskiert] ({n.get('rssi', '')} dBm)")
             except Exception as e:
                 print(f"⚠️ Hinweis: BLE-WLAN-Scan übersprungen/fehlgeschlagen ({e}). Fahre mit Zugangsdaten-Übertragung fort...")
 
@@ -346,8 +384,8 @@ class TestEPD13Lifecycle:
                 password=config.WIFI_PASSWORD,
                 timeout=25
             )
-            assert success is True, f"WLAN-Verbindung zu '{config.WIFI_SSID}' konnte nicht hergestellt werden!"
-            print(f"🎉 BLE-Provisionierung für {self.device_id} erfolgreich verifiziert.")
+            assert success is True, f"WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
+            print(f"🎉 BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
         except Exception as exc:
             print(f"\n🛑 [EPD13] BLE-WLAN-Provisionierung fehlgeschlagen: {exc}")
             print("   ➔ Ohne WLAN-Verbindung können nachfolgende Tests (OTA, AWS, REST) nicht funktionieren.")
@@ -370,14 +408,15 @@ class TestEPD13Lifecycle:
                 device.reset(method="relay_hex")
                 device.wait_for_pattern(r"\[AWS\] CONNECTED", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
 
-            # 2. Jetzt, wo MQTT aktiv verbunden ist: Triggere OTA
-            print(f"\n📡 [EPD13] Triggere Produktions-OTA via Manifest '{self.manifest_url}' (erwartete Version: V{version})...")
-            aws_verifier.trigger_ota(self.device_id, self.manifest_url)
-
-            # 3. Warte auf OTA-Befehlsempfang
-            device.wait_for_pattern(
-                r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing Manifest JSON|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
-                timeout=20
+            # 2. & 3. Jetzt, wo MQTT aktiv verbunden ist: Triggere OTA mit automatischem Retry bei Timeout
+            trigger_ota_with_retry(
+                device=device,
+                aws_verifier=aws_verifier,
+                device_id=self.device_id,
+                ota_url=self.manifest_url,
+                pattern=r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing Manifest JSON|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
+                retries=2,
+                timeout_per_try=20
             )
 
             # 4. Warte auf den echten Neustart NACH dem Flashen (nur ab jetzt eintreffende Logs!)
@@ -410,14 +449,15 @@ class TestEPD13Lifecycle:
                     device.reset(method="relay_hex")
                     device.wait_for_pattern(r"\[AWS\] CONNECTED", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
 
-                # 2. Jetzt, wo MQTT aktiv verbunden ist: Triggere Kandidaten-OTA
-                print(f"\n📡 [EPD13] Triggere Kandidaten-OTA via Direkt-URL '{direct_url}'...")
-                aws_verifier.trigger_ota(self.device_id, direct_url)
-
-                # 3. Warte auf OTA-Befehlsempfang
-                device.wait_for_pattern(
-                    r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing direct binary URL|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
-                    timeout=20
+                # 2. & 3. Jetzt, wo MQTT aktiv verbunden ist: Triggere Kandidaten-OTA mit automatischem Retry bei Timeout
+                trigger_ota_with_retry(
+                    device=device,
+                    aws_verifier=aws_verifier,
+                    device_id=self.device_id,
+                    ota_url=direct_url,
+                    pattern=r"(?:\[AWS RX\] OTA URL received|\[OTA\] Processing direct binary URL|\[OTA\] (?:Dev )?OTA (?:via MQTT )?Started)",
+                    retries=2,
+                    timeout_per_try=20
                 )
 
                 # 4. Warte auf den echten Neustart NACH dem Flashen (nur ab jetzt eintreffende Logs!)
@@ -438,7 +478,7 @@ class TestEPD13Lifecycle:
     def test_04_device_activation(self, aws_verifier):
         """Schritt 4: Aktiviert das Gerät über die REST-API (/activatedevice) und wartet auf autonomen Handshake des Geräts (ohne Relais-Reset)."""
         with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:
-            print(f"\n🔑 [EPD13] Rufe Aktivierungs-API (POST /activatedevice) für '{self.device_id}' auf...")
+            print(f"\n🔑 [EPD13] Rufe Aktivierungs-API (POST /activatedevice) für '{mask_uid(self.device_id)}' auf...")
             aws_verifier.set_device_activation_pending(self.device_id)
 
             print(f"⏳ [EPD13] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
@@ -459,7 +499,7 @@ class TestEPD13Lifecycle:
 
     def test_05_picture_render_and_payload(self, aws_verifier):
         """Schritt 5: Lädt Testbild über Presigned URL hoch, prüft Download, Rendering und DynamoDB Quittung."""
-        print(f"\n🖼️ [EPD13] Generiere und lade Testbild für '{self.device_id}' hoch...")
+        print(f"\n🖼️ [EPD13] Generiere und lade Testbild für '{mask_uid(self.device_id)}' hoch...")
         key, t_upload = aws_verifier.upload_test_image(self.device_id, width=1200, height=1600)
 
         with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:
@@ -484,7 +524,7 @@ class TestEPD13Lifecycle:
 
     def test_06_deactivate_and_deep_sleep(self, aws_verifier):
         """Schritt 6: Deaktiviert das Gerät über die REST-API (/activatedevice reset: True) und prüft Übergang in den Deep Sleep."""
-        print(f"\n🛑 [EPD13] Führe Deaktivierung über REST-API für '{self.device_id}' durch...")
+        print(f"\n🛑 [EPD13] Führe Deaktivierung über REST-API für '{mask_uid(self.device_id)}' durch...")
         aws_verifier.deactivate_device(self.device_id)
 
         with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:

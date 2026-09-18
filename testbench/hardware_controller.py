@@ -26,6 +26,8 @@ try:
 except ImportError:
     serial = None
 
+from .privacy import mask_uid, mask_mac, mask_path, sanitize_log_line, register_github_mask
+
 class HardwareSetupError(RuntimeError):
     """Wird ausgelöst, wenn Displays oder Relais bei der automatischen Hardware-Prüfung fehlen oder fehlerhaft sind."""
     pass
@@ -121,7 +123,7 @@ class ESP32HardwareController:
                 match = regex.search(line)
                 if match:
                     elapsed = round(time.time() - start_time, 2)
-                    print(f"🎯 [{self.name}] Event erkannt nach {elapsed}s: '{line}'")
+                    print(f"🎯 [{self.name}] Event erkannt nach {elapsed}s: '{sanitize_log_line(line)}'")
                     return match
 
             checked_index = len(current_logs)
@@ -129,7 +131,7 @@ class ESP32HardwareController:
             self._new_line_event.clear()
 
         elapsed = round(time.time() - start_time, 2)
-        recent_tail = "\n".join(self.log_history[-10:]) if self.log_history else "<keine Logs>"
+        recent_tail = "\n".join([sanitize_log_line(l) for l in self.log_history[-10:]]) if self.log_history else "<keine Logs>"
         raise TimeoutError(
             f"[{self.name}] Timeout ({timeout}s) beim Warten auf Muster '{pattern}'!\n"
             f"Letzte Log-Zeilen:\n{recent_tail}"
@@ -543,8 +545,12 @@ class ESP32HardwareController:
                 sn = display_info.get("serial_number")
                 ver = display_info.get("version")
 
+                register_github_mask(uid)
+                register_github_mask(sn)
+                register_github_mask(display_info.get("mac"))
+
                 print(f"  🎯 Treffer! Relais {r_port} steuert Display an {booted_port}")
-                print(f"     ➔ Typ: {dtype.upper()} | UID: {uid} | SN/MAC: {sn} | Firmware: V{ver}")
+                print(f"     ➔ Typ: {dtype.upper()} | UID: {mask_uid(uid)} | SN/MAC: {mask_mac(sn)} | Firmware: V{ver}")
 
                 display_info["relay_port"] = r_port
                 display_info["port"] = booted_port
@@ -565,8 +571,11 @@ class ESP32HardwareController:
         for expected in ("epd7", "epd13"):
             if expected in paired:
                 info = paired[expected]
+                register_github_mask(info.get("uid"))
+                register_github_mask(info.get("serial_number"))
+                register_github_mask(info.get("mac"))
                 print(f"  ✅ {expected.upper()}: Display={info['port']} (CP210x) ➔ Relais={info['relay_port']} (CH340)")
-                print(f"     UID: {info['uid']} | SN/MAC: {info['serial_number']} | Firmware: V{info['version']}")
+                print(f"     UID: {mask_uid(info['uid'])} | SN/MAC: {mask_mac(info['serial_number'])} | Firmware: V{info['version']}")
             else:
                 print(f"  ⚪ {expected.upper()}: Nicht angeschlossen / nicht erkannt")
 

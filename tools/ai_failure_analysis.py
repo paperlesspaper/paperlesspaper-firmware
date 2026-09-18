@@ -90,6 +90,19 @@ def sanitize_log(text, extra_secrets=None):
     # URLs mit Basic-Auth (https://user:pass@host)
     sanitized = re.sub(r"(https?://)([^:\s]+):([^@\s]+)@", r"\1[REDACTED_USER]:[REDACTED_PASS]@", sanitized)
 
+    # MAC-Adressen (AA:BB:CC:DD:EE:FF oder AA-BB-CC-DD-EE-FF)
+    sanitized = re.sub(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", "[REDACTED_MAC]", sanitized)
+
+    # EPD Hardware-UIDs (z. B. epd7-4c7525df8abc, epd13-64e833...)
+    sanitized = re.sub(r"\bepd(?:7|13)-[0-9a-zA-Z_-]{4,}\b", "[REDACTED_UID]", sanitized)
+
+    # BLE Device-Namen (z. B. EPD7_DF8ABC, EPD13_123456)
+    sanitized = re.sub(r"\b(?:EPD7|EPD13)_[0-9A-Fa-f]{4,}\b", "[REDACTED_DEVICE]", sanitized)
+
+    # Dateipfade mit Benutzernamen (Windows & Linux Runner Privacy)
+    sanitized = re.sub(r"[A-Za-z]:\\[Uu]sers\\[^\\]+\\", r"<runner_root>\\", sanitized)
+    sanitized = re.sub(r"/home/[^/]+/", r"<runner_root>/", sanitized)
+
     # Typische Log-Zeilen für WLAN & Passwörter
     sanitized = re.sub(r"(?i)(passwort|password|passwd|secret|api_?key)\s*[:=]\s*[^\s,]+", r"\1: [REDACTED]", sanitized)
     sanitized = re.sub(r'(?i)"(passwort|password|passwd|secret|token|key|ssid)"\s*:\s*"[^"]*"', r'"\1": "[REDACTED]"', sanitized)

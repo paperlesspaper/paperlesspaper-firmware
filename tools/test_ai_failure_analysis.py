@@ -63,6 +63,18 @@ class TestAIFailureAnalysis(unittest.TestCase):
         self.assertNotIn("admin:supersecret", redacted)
         self.assertIn("[REDACTED_USER]:[REDACTED_PASS]@", redacted)
 
+    def test_mac_uid_and_path_redaction(self):
+        sample = "Device epd7-4c7525df8abc (MAC: 4c:75:25:df:8a:bc, BLE: EPD7_DF8ABC) failed at C:\\Users\\runneradmin\\workspace\\test.py"
+        redacted = sanitize_log(sample)
+        self.assertNotIn("4c7525df8abc", redacted)
+        self.assertNotIn("4c:75:25:df:8a:bc", redacted)
+        self.assertNotIn("EPD7_DF8ABC", redacted)
+        self.assertNotIn("runneradmin", redacted)
+        self.assertIn("[REDACTED_UID]", redacted)
+        self.assertIn("[REDACTED_MAC]", redacted)
+        self.assertIn("[REDACTED_DEVICE]", redacted)
+        self.assertIn("<runner_root>\\", redacted)
+
     def test_length_clipping(self):
         large_text = "A" * 6000
         redacted = sanitize_log(large_text)
