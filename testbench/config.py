@@ -96,7 +96,7 @@ DYNAMODB_PAYLOAD_TABLE = os.environ.get("DYNAMODB_PAYLOAD_TABLE", "iotPayload")
 # Timeouts in Sekunden
 BOOT_TIMEOUT = int(os.environ.get("HIL_BOOT_TIMEOUT", "20"))
 WIFI_CONNECT_TIMEOUT = int(os.environ.get("HIL_WIFI_TIMEOUT", "30"))
-OTA_UPDATE_TIMEOUT = int(os.environ.get("HIL_OTA_TIMEOUT", "90"))
+OTA_UPDATE_TIMEOUT = int(os.environ.get("HIL_OTA_TIMEOUT", "180"))
 RENDER_TIMEOUT = int(os.environ.get("HIL_RENDER_TIMEOUT", "60"))
 DEEP_SLEEP_TIMEOUT = int(os.environ.get("HIL_SLEEP_TIMEOUT", "20"))
 
