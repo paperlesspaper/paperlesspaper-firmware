@@ -141,6 +141,26 @@ class TestAIFailureAnalysis(unittest.TestCase):
         self.assertIn("Pre-Flight KI-Risikoanalyse (Zusammenfassung)", md)
         self.assertIn("Vollständigen Pre-Flight Audit-Bericht anzeigen", md)
 
+    def test_privacy_module_sanitization(self):
+        from testbench.privacy import mask_path, sanitize_log_line, mask_uid, mask_mac
+        win_path = "C:\\Users\\danie\\actions-runner\\_work\\firmware\\test.py"
+        masked = mask_path(win_path)
+        self.assertNotIn("danie", masked)
+        self.assertIn("<runner_root>\\", masked)
+
+        linux_path = "/home/johndoe/work/firmware/test.py"
+        masked_linux = mask_path(linux_path)
+        self.assertNotIn("johndoe", masked_linux)
+        self.assertIn("<runner_root>/", masked_linux)
+
+        log = "Event on epd7-dc1ed57e3334 at C:\\Users\\danie\\actions-runner with MAC DC:1E:D5:7E:33:34"
+        clean_log = sanitize_log_line(log)
+        self.assertNotIn("dc1ed57e3334", clean_log)
+        self.assertNotIn("danie", clean_log)
+        self.assertIn("epd7-***3334", clean_log)
+        self.assertIn("<runner_root>\\", clean_log)
+        self.assertIn("**:**:**:**:**:34", clean_log)
+
 
 if __name__ == "__main__":
     unittest.main()

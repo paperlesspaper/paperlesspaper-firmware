@@ -100,8 +100,8 @@ def sanitize_log(text, extra_secrets=None):
     sanitized = re.sub(r"\b(?:EPD7|EPD13)_[0-9A-Fa-f]{4,}\b", "[REDACTED_DEVICE]", sanitized)
 
     # Dateipfade mit Benutzernamen (Windows & Linux Runner Privacy)
-    sanitized = re.sub(r"[A-Za-z]:\\[Uu]sers\\[^\\]+\\", r"<runner_root>\\", sanitized)
-    sanitized = re.sub(r"/home/[^/]+/", r"<runner_root>/", sanitized)
+    sanitized = re.sub(r"[A-Za-z]:\\[Uu]sers\\[^\\]+\\", lambda m: "<runner_root>\\", sanitized)
+    sanitized = re.sub(r"/home/[^/]+/", lambda m: "<runner_root>/", sanitized)
 
     # Typische Log-Zeilen für WLAN & Passwörter
     sanitized = re.sub(r"(?i)(passwort|password|passwd|secret|api_?key)\s*[:=]\s*[^\s,]+", r"\1: [REDACTED]", sanitized)

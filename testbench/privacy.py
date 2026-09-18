@@ -135,11 +135,14 @@ def mask_path(path):
     """
     Maskiert Benutzerprofile und Runner-Pfade:
     - 'C:\\Users\\danie\\actions-runner\\...' -> '<runner_root>\\...'
+    - '/home/runner/...' -> '<runner_root>/...'
     """
     if not path:
         return ""
     p_str = str(path)
-    return re.sub(r"[A-Za-z]:\\[Uu]sers\\[^\\]+\\", "<runner_root>\\", p_str)
+    p_str = re.sub(r"[A-Za-z]:\\[Uu]sers\\[^\\]+\\", lambda m: "<runner_root>\\", p_str)
+    p_str = re.sub(r"/home/[^/]+/", lambda m: "<runner_root>/", p_str)
+    return p_str
 
 
 def sanitize_log_line(line):
