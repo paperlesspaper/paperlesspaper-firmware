@@ -113,7 +113,15 @@ class ESP32HardwareController:
             except Exception:
                 if not self._running:
                     break
-                time.sleep(0.05)
+                # Bei USB-Stromunterbrechung (z. B. WinError 5 / ClearCommError nach Relais-Puls):
+                # Toten Handle explizit schließen, damit im nächsten Schleifendurchlauf ser.open()
+                # nach der USB-Re-Enumeration aufgerufen werden kann.
+                try:
+                    if self.ser and self.ser.is_open:
+                        self.ser.close()
+                except Exception:
+                    pass
+                time.sleep(0.2)
 
     def wait_for_pattern(self, pattern, timeout=30, case_sensitive=False, from_current=False):
         """
@@ -279,7 +287,7 @@ class ESP32HardwareController:
                 with self._lock:
                     logs = list(self.log_history)
                 for l in logs:
-                    m = re.search(r"Button wake detected! NVS Counter:\s*(\d+)/5", l)
+                    m = re.search(r"Button wake detected! NVS Counter:\s*(\d+)/5", l) or re.search(r"Current counter value:\s*(\d+)", l)
                     if m:
                         counter_found = int(m.group(1))
                         break

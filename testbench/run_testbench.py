@@ -7,6 +7,7 @@ Ermöglicht manuelle und CI-gesteuerte Testläufe auf dem Windows-Testbench-Host
 
 import sys
 import os
+import time
 import argparse
 
 # Windows CLI Encoding-Fix
