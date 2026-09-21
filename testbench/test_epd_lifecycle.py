@@ -97,29 +97,6 @@ def aws_verifier():
         print(f"ℹ️ AWSTestVerifier nicht verfügbar: {e}")
         return None
 
-@pytest.fixture(scope="session", autouse=True)
-def isolate_relays_session_lifecycle():
-    """
-    Schaltet am Anfang der gesamten Test-Session immer beide Relais ab,
-    damit nur das jeweils getestete Gerät mit Strom versorgt wird und keine Störungen auftreten.
-    """
-    print("\n" + "=" * 65)
-    print("⚡ [HIL Session] Schalte am Anfang alle Relais AUS (Hardware-Isolation)...")
-    if config.EPD7_RELAY_PORT:
-        ESP32HardwareController.set_relay_power(config.EPD7_RELAY_PORT, power_on=False)
-    if config.EPD13_RELAY_PORT:
-        ESP32HardwareController.set_relay_power(config.EPD13_RELAY_PORT, power_on=False)
-    time.sleep(0.5)
-    print("=" * 65 + "\n")
-    yield
-    print("\n" + "=" * 65)
-    print("⚡ [HIL Session] Test-Session abgeschlossen: Schalte alle Relais AUS...")
-    if config.EPD7_RELAY_PORT:
-        ESP32HardwareController.set_relay_power(config.EPD7_RELAY_PORT, power_on=False)
-    if config.EPD13_RELAY_PORT:
-        ESP32HardwareController.set_relay_power(config.EPD13_RELAY_PORT, power_on=False)
-    print("=" * 65 + "\n")
-
 class TestEPD7Lifecycle:
     """Testzyklus für das 7.5 Zoll Display (EPD7)."""
 
@@ -137,11 +114,8 @@ class TestEPD7Lifecycle:
     @classmethod
     def device(cls):
         """Hält den seriellen Port für den gesamten EPD7-Testzyklus dauerhaft offen."""
-        available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
         port = config.EPD7_COM_PORT
         relay_port = config.EPD7_RELAY_PORT
-        if port not in available_ports:
-            pytest.skip(f"Hardware-Port {port} für EPD7 nicht angeschlossen (verfügbar: {available_ports}).")
 
         # Stromversorgungs-Isolation: EPD13 AUS, EPD7 AN
         print("⚡ [EPD7 Testzyklus] Schalte Relais für EPD13 AUS und für EPD7 AN...")
@@ -149,7 +123,19 @@ class TestEPD7Lifecycle:
             ESP32HardwareController.set_relay_power(config.EPD13_RELAY_PORT, power_on=False)
         if relay_port:
             ESP32HardwareController.set_relay_power(relay_port, power_on=True)
+
+        # Bis zu 3s warten, falls Windows den CP210x Port nach dem Zuschalten enumeriert
+        port_found = False
+        available_ports = []
+        for _ in range(6):
+            available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
+            if port in available_ports:
+                port_found = True
+                break
             time.sleep(0.5)
+
+        if not port_found:
+            pytest.skip(f"Hardware-Port {port} für EPD7 nicht angeschlossen (verfügbar: {available_ports}).")
 
         ctrl = ESP32HardwareController(port, name="EPD7", relay_port=relay_port)
         ctrl.connect()
@@ -166,8 +152,17 @@ class TestEPD7Lifecycle:
         self.relay_port = config.EPD7_RELAY_PORT
         self.device_id = config.EPD7_DEVICE_ID
         self.candidate_bin_path = config.DEFAULT_CANDIDATE_EPD7
-        available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
-        if self.port not in available_ports:
+
+        port_found = False
+        available_ports = []
+        for _ in range(4):
+            available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
+            if self.port in available_ports:
+                port_found = True
+                break
+            time.sleep(0.5)
+
+        if not port_found:
             pytest.skip(f"Hardware-Port {self.port} für EPD7 nicht angeschlossen (verfügbar: {available_ports}).")
 
     def test_00_factory_reset_via_power_cycles(self, device, aws_verifier):
@@ -475,11 +470,8 @@ class TestEPD13Lifecycle:
     @classmethod
     def device(cls):
         """Hält den seriellen Port für den gesamten EPD13-Testzyklus dauerhaft offen."""
-        available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
         port = config.EPD13_COM_PORT
         relay_port = config.EPD13_RELAY_PORT
-        if port not in available_ports:
-            pytest.skip(f"Hardware-Port {port} für EPD13 nicht angeschlossen (verfügbar: {available_ports}).")
 
         # Stromversorgungs-Isolation: EPD7 AUS, EPD13 AN
         print("⚡ [EPD13 Testzyklus] Schalte Relais für EPD7 AUS und für EPD13 AN...")
@@ -487,7 +479,19 @@ class TestEPD13Lifecycle:
             ESP32HardwareController.set_relay_power(config.EPD7_RELAY_PORT, power_on=False)
         if relay_port:
             ESP32HardwareController.set_relay_power(relay_port, power_on=True)
+
+        # Bis zu 3s warten, falls Windows den CP210x Port nach dem Zuschalten enumeriert
+        port_found = False
+        available_ports = []
+        for _ in range(6):
+            available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
+            if port in available_ports:
+                port_found = True
+                break
             time.sleep(0.5)
+
+        if not port_found:
+            pytest.skip(f"Hardware-Port {port} für EPD13 nicht angeschlossen (verfügbar: {available_ports}).")
 
         ctrl = ESP32HardwareController(port, name="EPD13", relay_port=relay_port)
         ctrl.connect()
@@ -504,8 +508,17 @@ class TestEPD13Lifecycle:
         self.relay_port = config.EPD13_RELAY_PORT
         self.device_id = config.EPD13_DEVICE_ID
         self.candidate_bin_path = config.DEFAULT_CANDIDATE_EPD13
-        available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
-        if self.port not in available_ports:
+
+        port_found = False
+        available_ports = []
+        for _ in range(4):
+            available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
+            if self.port in available_ports:
+                port_found = True
+                break
+            time.sleep(0.5)
+
+        if not port_found:
             pytest.skip(f"Hardware-Port {self.port} für EPD13 nicht angeschlossen (verfügbar: {available_ports}).")
 
     def test_00_factory_reset_via_power_cycles(self, device, aws_verifier):
