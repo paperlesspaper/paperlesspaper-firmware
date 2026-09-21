@@ -8,7 +8,10 @@ Hardware-in-the-Loop (HIL) Testsuite für ESP32-C6 basierte E-Paper Displays (**
 
 * **Displays:** ESP32-C6 Boards, angeschlossen über **Silicon Labs CP210x** USB-zu-UART Bridges.
 * **Stromversorgung & Reset:** Schaltung über **CH340 USB-Relais** (`relay_hex`), da DTR/RTS hardwareseitig nicht angebunden sind. Das Display wechselt bei Inaktivität oder fehlendem WLAN autonom in den Deep Sleep; alle Testschritte (inkl. BLE-Provisionierung) nutzen automatische Relais-Wakeups bei ausbleibenden UART-Logs.
-* **Robuste COM-Port-Kommunikation auf Windows-Runnern:** Der `ESP32HardwareController` fängt USB-Re-Enumerationen nach Relais-Schaltzyklen durch automatische Verbindungs-Retries ab und schließt serielle Handles erst nach Beendigung des Hintergrund-Reader-Threads, um Win32-Driver-Locks zuverlässig zu vermeiden.
+* **Robuste COM-Port-Kommunikation auf Windows-Runnern:**
+  - **Permanente serielle Verbindung:** Der serielle Port des Displays bleibt **vor, während und nach Relais-Power-Cycles dauerhaft geöffnet**. Dadurch gehen keine Boot-Logs (wie `Button wake detected! NVS Counter: ...` oder `[BLE] BLE Advertising started`) in den ersten Millisekunden nach dem Einschalten verloren.
+  - **Klassenweite Test-Fixture:** In `test_epd_lifecycle.py` wird die serielle Verbindung über eine Klassen-Fixture (`scope="class"`) für den gesamten Testzyklus (`test_00` bis `test_06`) dauerhaft aufrechterhalten, statt sie zwischen den Tests wiederholt zu schließen und neu zu öffnen.
+  - **Saubere Win32-Freigabe:** Der Hintergrund-Reader-Thread wird vor dem Schließen des Handles via `join()` geordnet beendet, um Treiberblockaden unter Windows CP210x zuverlässig zu verhindern.
 * **Automatische Zuordnung (`verify_and_pair_hardware`):**
   Die Testbench erkennt alle CP210x- und CH340-Ports automatisch, schaltet jedes Relais kurz stromlos und analysiert die seriellen Boot-Logs (`[MAIN] INIT Device V: ...`), um Relais-Port, Display-Port, MAC-Adresse und Display-Typ (EPD7 vs. EPD13) zuzuordnen. Die Zuordnung wird in `testbench/hardware_mapping.json` (git-ignoriert) gemerged und gecacht sowie als Umgebungsvariablen (`EPD7_COM_PORT`, etc.) bereitgestellt.
 

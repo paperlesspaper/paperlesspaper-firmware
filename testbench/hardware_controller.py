@@ -196,16 +196,16 @@ class ESP32HardwareController:
                     f"[{self.name}] Kein Relais-Port für den Power-Cycle konfiguriert oder zugeordnet!"
                 )
 
-            print(f"⚡ [{self.name}] Schalte USB-Relais an Port {target_relay}...")
-            was_open = self._running and self.ser and self.ser.is_open
-            if was_open:
-                self.disconnect()
-
-            self.pulse_relay(target_relay)
-            time.sleep(0.8)
-
-            if was_open:
+            # VOR dem Relais-Puls sicherstellen, dass der serielle Port offen ist,
+            # damit sofort ab der ersten Millisekunde nach dem Booten alle Logs empfangen werden.
+            if not (self._running and self.ser and self.ser.is_open):
                 self.connect()
+
+            self.clear_logs()
+
+            print(f"⚡ [{self.name}] Schalte USB-Relais an Port {target_relay} (Port {self.port} bleibt dauerhaft offen)...")
+            self.pulse_relay(target_relay)
+            time.sleep(0.3)
 
             print(f"✅ [{self.name}] USB-Relais Power-Cycle erfolgreich.")
 
