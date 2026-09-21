@@ -92,7 +92,16 @@ class ESP32HardwareController:
 
     def _reader_loop(self):
         """Liest zeilenweise asynchron aus dem seriellen Port."""
-        while self._running and self.ser and self.ser.is_open:
+        while self._running:
+            if not (self.ser and self.ser.is_open):
+                try:
+                    time.sleep(0.2)
+                    if self._running and self.ser:
+                        self.ser.open()
+                except Exception:
+                    time.sleep(0.2)
+                    continue
+
             try:
                 line_bytes = self.ser.readline()
                 if line_bytes:
@@ -201,6 +210,11 @@ class ESP32HardwareController:
             if not (self._running and self.ser and self.ser.is_open):
                 self.connect()
 
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.reset_input_buffer()
+                except Exception:
+                    pass
             self.clear_logs()
 
             print(f"⚡ [{self.name}] Schalte USB-Relais an Port {target_relay} (Port {self.port} bleibt dauerhaft offen)...")
@@ -437,6 +451,10 @@ class ESP32HardwareController:
                 hwid = (p.get("hwid") or "").lower()
                 port = p["port"]
 
+                # Ignoriere Bluetooth- und interne PCI/Motherboard-Schnittstellen (z.B. Intel AMT)
+                if any(x in hwid or x in desc for x in ("bthenum", "bthmodem", "bluetooth", "pci\\ven", "active management")):
+                    continue
+
                 if "cp210" in desc or "10c4:ea60" in hwid or "silicon labs" in desc or "silabser" in hwid:
                     cp210x_ports.append(port)
                 elif "ch340" in desc or "1a86:7523" in hwid or "ch341" in desc or "serial2" in hwid:
@@ -460,11 +478,11 @@ class ESP32HardwareController:
         """
         Automatische Vorab-Prüfung und Zuordnung:
           1. Erkennt Displays (CP210x) und Relais (CH340).
-          2. Schaltet jedes Relais einzeln (Display-Ports bleiben während des Schaltens geschlossen,
-             um Windows USB-Treiberfehler durch Spannungsabfall zu verhindern).
-          3. Öffnet Display-Ports nach 0.5s Re-Enumeration und lauscht auf serielle Boot-Logs.
-          4. Liest UID, MAC/Seriennummer, Typ (epd7/epd13) und Firmware aus.
-          5. Verifiziert mindestens ein Display bzw. die in required_targets angeforderten Targets.
+          2. Öffnet alle Display-Ports parallel, leert deren Puffer und lauscht zeitgleich.
+          3. Schaltet jedes Relais einzeln (Display-Ports bleiben dauerhaft geöffnet).
+          4. Erkennt in Echtzeit, welches Display auf den Relais-Puls reagiert hat.
+          5. Liest UID, MAC/Seriennummer, Typ (epd7/epd13) und Firmware aus.
+          6. Verifiziert mindestens ein Display bzw. die in required_targets angeforderten Targets.
         """
         print("=" * 65)
         print("🔍 AUTOMATISCHE HARDWARE-VERIFIKATION & RELAIS-ZUORDNUNG")
@@ -482,8 +500,8 @@ class ESP32HardwareController:
             print("ℹ️ Keine expliziten CH340-Ports im Treibernamen, nutze sonstige Ports als Relais-Kandidaten...")
             relay_candidates = [p for p in categorized["other"] if p not in display_candidates]
 
-        print(f"  📺 Display-Kandidaten (CP210x): {display_candidates or 'Keine'}")
-        print(f"  ⚡ Relais-Kandidaten  (CH340):  {relay_candidates or 'Keine'}")
+        print(f"  📺 Display-Kandidaten: {display_candidates or 'Keine'}")
+        print(f"  ⚡ Relais-Kandidaten:  {relay_candidates or 'Keine'}")
 
         if not relay_candidates:
             raise HardwareSetupError(
@@ -499,76 +517,101 @@ class ESP32HardwareController:
         paired = {}
         paired_displays = set()
 
-        for r_port in relay_candidates:
-            remaining_displays = [d for d in display_candidates if d not in paired_displays]
-            if not remaining_displays:
-                break
-
-            print(f"\n⚡ Schalte Relais an {r_port} (Power-Cycle) und lausche auf Display-Neustart...")
+        # 1. Alle Display-Kandidaten vorab öffnen, RX-Puffer leeren und Reader starten,
+        # damit beim Schalten eines Relais zeitgleich auf allen Displays gelauscht wird.
+        active_controllers = {}
+        for d_port in display_candidates:
             try:
-                cls.pulse_relay(r_port, off_duration=0.8)
+                ctrl = cls(d_port, baudrate=115200, name=f"Probe-{d_port}")
+                ctrl.connect()
+                if ctrl.ser and ctrl.ser.is_open:
+                    try:
+                        ctrl.ser.reset_input_buffer()
+                    except Exception:
+                        pass
+                ctrl.clear_logs()
+                active_controllers[d_port] = ctrl
             except Exception as e:
-                print(f"  ⚠️ Fehler beim Schalten von Relais {r_port}: {e}")
-                continue
+                print(f"  ⚠️ Konnte Display-Port {d_port} nicht vorab öffnen: {e}")
 
-            # 0.5s Pause für Windows USB Re-Enumeration nach Spannungswiederkehr
-            time.sleep(0.5)
+        try:
+            for r_port in relay_candidates:
+                remaining_ports = [d for d in active_controllers if d not in paired_displays]
+                if not remaining_ports:
+                    break
 
-            booted_port = None
-            display_info = None
+                # Vor jedem Relais-Puls die Log-Historie und OS-RX-Buffer aller verbleibenden Displays säubern
+                for d_port in remaining_ports:
+                    ctrl = active_controllers[d_port]
+                    if ctrl.ser and ctrl.ser.is_open:
+                        try:
+                            ctrl.ser.reset_input_buffer()
+                        except Exception:
+                            pass
+                    ctrl.clear_logs()
 
-            # Prüfe verbleibende Display-Kandidaten
-            for d_port in remaining_displays:
-                ctrl = None
+                print(f"\n⚡ Schalte Relais an {r_port} (Power-Cycle) und lausche parallel auf Displays {remaining_ports}...")
                 try:
-                    ctrl = cls(d_port, baudrate=115200, name=f"Probe-{d_port}")
-                    ctrl.connect()
+                    cls.pulse_relay(r_port, off_duration=0.8)
+                except Exception as e:
+                    print(f"  ⚠️ Fehler beim Schalten von Relais {r_port}: {e}")
+                    continue
 
-                    # Bis zu 4 Sekunden auf Boot-Meldungen lauschen
-                    start_t = time.time()
-                    found_boot = False
-                    while (time.time() - start_t) < 4.0:
+                # Parallel lauschen, welches Display tatsächlich nach dem Relais-Puls neu startet
+                start_t = time.time()
+                booted_port = None
+
+                while (time.time() - start_t) < timeout_per_relay:
+                    for d_port in remaining_ports:
+                        ctrl = active_controllers[d_port]
                         with ctrl._lock:
                             logs = list(ctrl.log_history)
-                        if any("[MAIN] INIT" in line or "[MAIN] UID" in line or "[WIFI] MAC" in line for line in logs):
-                            found_boot = True
+                        if any(
+                            "[MAIN] INIT" in line
+                            or "[MAIN] UID" in line
+                            or "[WIFI] MAC" in line
+                            or "Button wake detected!" in line
+                            or "[WAKE] Got Button Wakeup" in line
+                            for line in logs
+                        ):
+                            booted_port = d_port
                             break
-                        time.sleep(0.15)
-
-                    if found_boot:
-                        display_info = ctrl.read_device_identity(reset=False, timeout=3, fallback_esptool=False)
-                        booted_port = d_port
+                    if booted_port:
                         break
+                    time.sleep(0.1)
+
+                if booted_port:
+                    ctrl = active_controllers[booted_port]
+                    display_info = ctrl.read_device_identity(reset=False, timeout=4, fallback_esptool=False)
+                    dtype = display_info.get("display_type", "unknown")
+                    uid = display_info.get("uid")
+                    sn = display_info.get("serial_number")
+                    ver = display_info.get("version")
+
+                    register_github_mask(uid)
+                    register_github_mask(sn)
+                    register_github_mask(display_info.get("mac"))
+
+                    print(f"  🎯 Eindeutiger Treffer! Relais {r_port} steuert Display an {booted_port}")
+                    print(f"     ➔ Typ: {dtype.upper()} | UID: {mask_uid(uid)} | SN/MAC: {mask_mac(sn)} | Firmware: V{ver}")
+
+                    display_info["relay_port"] = r_port
+                    display_info["port"] = booted_port
+
+                    if dtype in ("epd7", "epd13"):
+                        paired[dtype] = display_info
+                        paired_displays.add(booted_port)
+                    else:
+                        print(f"  ⚠️ Unerwarteter Display-Typ '{dtype}' an {booted_port}")
+                        paired[f"unknown_{booted_port}"] = display_info
+                else:
+                    print(f"  ⚪ Kein Display-Neustart nach Relais-Puls an {r_port} erkannt.")
+        finally:
+            for ctrl in active_controllers.values():
+                try:
+                    ctrl.disconnect()
                 except Exception:
                     pass
-                finally:
-                    if ctrl:
-                        ctrl.disconnect()
-
-            if booted_port and display_info:
-                dtype = display_info.get("display_type", "unknown")
-                uid = display_info.get("uid")
-                sn = display_info.get("serial_number")
-                ver = display_info.get("version")
-
-                register_github_mask(uid)
-                register_github_mask(sn)
-                register_github_mask(display_info.get("mac"))
-
-                print(f"  🎯 Treffer! Relais {r_port} steuert Display an {booted_port}")
-                print(f"     ➔ Typ: {dtype.upper()} | UID: {mask_uid(uid)} | SN/MAC: {mask_mac(sn)} | Firmware: V{ver}")
-
-                display_info["relay_port"] = r_port
-                display_info["port"] = booted_port
-
-                if dtype in ("epd7", "epd13"):
-                    paired[dtype] = display_info
-                    paired_displays.add(booted_port)
-                else:
-                    print(f"  ⚠️ Unerwarteter Display-Typ '{dtype}' an {booted_port}")
-                    paired[f"unknown_{booted_port}"] = display_info
-            else:
-                print(f"  ⚪ Kein Display-Neustart nach Relais-Puls an {r_port} erkannt.")
 
         print("\n" + "=" * 65)
         print("📊 STATUS DER HARDWARE-VERIFIKATION:")

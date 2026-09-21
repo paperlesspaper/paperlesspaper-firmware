@@ -49,6 +49,7 @@ def main():
     parser.add_argument("--run-ota", action="store_true", help="Führt zusätzlich die zeitintensiven OTA-Firmware-Update-Tests aus")
     parser.add_argument("--test-ble", action="store_true", help="Führt den fokussierten BLE-WLAN-Provisionierungs-Testlauf durch (Relais-Wakeup -> BLE Scan -> GATT Provisioning)")
     parser.add_argument("--junitxml", help="Pfad zur JUnit-XML-Ausgabedatei für Testprotokolle")
+    parser.add_argument("--test-relay", help="Schaltet testweise ein Relais (z.B. COM8) und zeigt an, welches Display reagiert")
     parser.add_argument("--candidate-bin", help="Pfad zur Kandidaten-Firmware-Binärdatei (überschreibt CANDIDATE_FIRMWARE_EPD7/13)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Ausführliche PyTest-Ausgabe")
     args = parser.parse_args()
@@ -66,6 +67,53 @@ def main():
     if args.run_ota:
         os.environ["HIL_RUN_OTA"] = "1"
 
+    if args.test_relay:
+        r_port = args.test_relay.upper()
+        print(f"⚡ Schalte Test-Puls an Relais {r_port} (off_duration=0.8s)...")
+        cat = ESP32HardwareController.find_ports_by_chip()
+        display_ports = cat["cp210x"] or cat["other"]
+        active_controllers = {}
+        for dp in display_ports:
+            try:
+                c = ESP32HardwareController(dp, name=f"Probe-{dp}")
+                c.connect()
+                if c.ser and c.ser.is_open:
+                    try:
+                        c.ser.reset_input_buffer()
+                    except Exception:
+                        pass
+                c.clear_logs()
+                active_controllers[dp] = c
+            except Exception:
+                pass
+        try:
+            ESP32HardwareController.pulse_relay(r_port, off_duration=0.8)
+            print(f"✅ Relais {r_port} geschaltet. Lausche bis zu 5s auf Boot-Meldungen auf {list(active_controllers.keys())}...")
+            t0 = time.time()
+            detected = None
+            while (time.time() - t0) < 5.0:
+                for dp, c in active_controllers.items():
+                    with c._lock:
+                        lines = list(c.log_history)
+                    if any("[MAIN] INIT" in l or "[MAIN] UID" in l or "Button wake detected!" in l or "[WAKE]" in l for l in lines):
+                        detected = dp
+                        break
+                if detected:
+                    break
+                time.sleep(0.1)
+            if detected:
+                info = active_controllers[detected].read_device_identity(reset=False, timeout=3)
+                print(f"🎯 Treffer! Relais {r_port} hat Display {detected} ({info.get('display_type', '').upper()} / {info.get('uid')}) neu gestartet!")
+            else:
+                print(f"⚪ Kein Display-Neustart nach Relais-Puls an {r_port} registriert.")
+        finally:
+            for c in active_controllers.values():
+                try:
+                    c.disconnect()
+                except Exception:
+                    pass
+        sys.exit(0)
+
     if args.list_ports:
         cat = ESP32HardwareController.find_ports_by_chip()
         print("Erkannte serielle Ports im System:")
@@ -75,7 +123,7 @@ def main():
         if not cat["cp210x"]:
             print("     (keine CP210x Ports gefunden)")
 
-        print("  ⚡ Relais (CH340):")
+        print("  ⚡ USB-Relais (CH340):")
         for p in cat["ch340"]:
             print(f"     - {p}")
         if not cat["ch340"]:
@@ -99,6 +147,15 @@ def main():
             sys.exit(1)
 
     if args.factory_reset:
+        # Vor dem Factory-Reset Hardware prüfen/verifizieren, um sicherzustellen, dass
+        # die Relais den richtigen Displays zugeordnet sind (insb. bei Multi-Device Setup)
+        if not args.skip_check and not os.environ.get("HIL_SKIP_HARDWARE_CHECK"):
+            try:
+                targets_req = [args.target] if args.target in ("epd7", "epd13") else None
+                ESP32HardwareController.verify_and_pair_hardware(required_targets=targets_req)
+            except Exception as e:
+                print(f"⚠️ Hinweis bei automatischer Hardware-Prüfung vor dem Factory-Reset: {e}")
+
         targets = ["epd7", "epd13"] if args.target == "all" else [args.target]
         for t in targets:
             port = config.EPD7_COM_PORT if t == "epd7" else config.EPD13_COM_PORT

@@ -143,8 +143,9 @@ python -m pytest testbench/test_epd_lifecycle.py -k "TestEPD7Lifecycle" -s -v
 | `--candidate-bin <Pfad>` | Pfad zu einer lokalen `.bin` Firmware-Datei für den Test. |
 | `--run-ota` | Führt zusätzlich die zeitintensiven OTA-Update-Tests (Test 02 & 03) aus. |
 | `--test-ble` | Führt nur Factory-Reset und BLE-WLAN-Provisionierung aus. |
-| `--factory-reset` | Führt isoliert einen 6x Power-Cycle Factory-Reset durch. |
-| `--verify` / `--auto-detect` | Schaltet Relais durch und kalibriert die Hardware-Zuordnung neu. |
+| `--factory-reset` | Führt isoliert einen 6x Power-Cycle Factory-Reset durch (inkl. automatischer Vorab-Zuordnung). |
+| `--verify` / `--auto-detect` | Schaltet Relais durch und kalibriert die Hardware-Zuordnung via parallelem Listening neu. |
+| `--test-relay <Port>` | Schaltet ein einzelnes Relais (z.B. `COM8`) und zeigt live an, welches Display reagiert. |
 | `--skip-check` | Überspringt die Vorab-Hardwareprüfung (für schnelle Iterationen). |
 | `--list-ports` | Listet alle erkannten CP210x-Displays und CH340-Relais auf. |
 | `--junitxml <Pfad>` | Exportiert Testergebnisse als JUnit-XML-Protokoll. |
