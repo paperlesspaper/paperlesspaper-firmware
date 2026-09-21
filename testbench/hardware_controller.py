@@ -534,21 +534,170 @@ class ESP32HardwareController:
         }
 
     @classmethod
-    def verify_and_pair_hardware(cls, timeout_per_relay=6, save_cache=True, required_targets=None):
+    def _apply_and_save_paired(cls, paired, save_cache=True):
+        """Aktualisiert In-Memory-Config, Umgebungsvariablen und hardware_mapping.json."""
+        try:
+            from . import config
+            if "epd7" in paired:
+                config.EPD7_COM_PORT = paired["epd7"]["port"]
+                config.EPD7_RELAY_PORT = paired["epd7"]["relay_port"]
+                config.EPD7_DEVICE_ID = paired["epd7"]["uid"]
+                os.environ["EPD7_COM_PORT"] = str(paired["epd7"]["port"])
+                if paired["epd7"].get("relay_port"):
+                    os.environ["EPD7_RELAY_PORT"] = str(paired["epd7"]["relay_port"])
+                os.environ["EPD7_DEVICE_ID"] = str(paired["epd7"]["uid"])
+
+            if "epd13" in paired:
+                config.EPD13_COM_PORT = paired["epd13"]["port"]
+                config.EPD13_RELAY_PORT = paired["epd13"]["relay_port"]
+                config.EPD13_DEVICE_ID = paired["epd13"]["uid"]
+                os.environ["EPD13_COM_PORT"] = str(paired["epd13"]["port"])
+                if paired["epd13"].get("relay_port"):
+                    os.environ["EPD13_RELAY_PORT"] = str(paired["epd13"]["relay_port"])
+                os.environ["EPD13_DEVICE_ID"] = str(paired["epd13"]["uid"])
+        except Exception:
+            pass
+
+        if save_cache:
+            cache_file = os.path.join(os.path.dirname(__file__), "hardware_mapping.json")
+            try:
+                merged_data = {}
+                if os.path.isfile(cache_file):
+                    try:
+                        with open(cache_file, "r", encoding="utf-8") as f:
+                            merged_data = json.load(f)
+                    except Exception:
+                        pass
+                valid_paired = {k: v for k, v in paired.items() if k in ("epd7", "epd13")}
+                merged_data.update(valid_paired)
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(merged_data, f, indent=2)
+            except Exception:
+                pass
+
+    @classmethod
+    def verify_cached_hardware(cls, targets=None, timeout_per_device=5):
+        """
+        Prüft vorab, ob die in hardware_mapping.json gespeicherte Zuordnung noch gültig ist:
+          1. Liest hardware_mapping.json.
+          2. Schaltet das zugehörige Relais ein und prüft, ob die COM-Ports existieren.
+          3. Führt einen gezielten Relais-Reset durch und verifiziert UID und Display-Typ.
+        Gibt ein Dictionary mit den erfolgreich verifizierten Geräten zurück,
+        oder None falls die Prüfung für ein benötigtes Gerät fehlschlägt.
+        """
+        cache_file = os.path.join(os.path.dirname(__file__), "hardware_mapping.json")
+        if not os.path.isfile(cache_file):
+            return None
+
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cached_data = json.load(f)
+        except Exception:
+            return None
+
+        check_targets = targets or [t for t in ("epd7", "epd13") if t in cached_data]
+        if not check_targets:
+            return None
+
+        for t in check_targets:
+            entry = cached_data.get(t)
+            if not entry or not entry.get("port") or not entry.get("relay_port"):
+                return None
+
+        print(f"🔍 Prüfe bestehende Zuordnung aus hardware_mapping.json für: {check_targets}...")
+        available_ports = [p["port"] for p in cls.list_ports()]
+
+        verified = {}
+        for target in check_targets:
+            entry = cached_data[target]
+            d_port = entry["port"]
+            r_port = entry["relay_port"]
+
+            if r_port not in available_ports:
+                print(f"  ⚪ Relais-Port {r_port} für {target.upper()} nicht am System gefunden.")
+                return None
+
+            cls.set_relay_power(r_port, power_on=True)
+            time.sleep(0.5)
+
+            current_ports = [p["port"] for p in cls.list_ports()]
+            if d_port not in current_ports:
+                t_wait = time.time() + 2.0
+                while time.time() < t_wait:
+                    time.sleep(0.4)
+                    if d_port in [p["port"] for p in cls.list_ports()]:
+                        break
+                if d_port not in [p["port"] for p in cls.list_ports()]:
+                    print(f"  ⚪ Display-Port {d_port} für {target.upper()} nach Relais-Einschalten nicht vorhanden.")
+                    return None
+
+            try:
+                print(f"⚡ Teste bekanntes Paar {target.upper()}: Display {d_port} ➔ Relais {r_port}...")
+                with cls(d_port, baudrate=115200, name=f"Verify-{target.upper()}", relay_port=r_port) as ctrl:
+                    info = ctrl.read_device_identity(reset=True, timeout=timeout_per_device, fallback_esptool=False)
+            except Exception as e:
+                print(f"  ⚠️ Test fehlgeschlagen für {d_port} mit Relais {r_port}: {e}")
+                return None
+
+            detected_type = (info.get("display_type") or "").lower()
+            detected_uid = (info.get("uid") or "").lower()
+
+            is_valid = (
+                detected_type == target
+                or detected_uid.startswith(f"{target}-")
+                or (detected_type == "unknown" and info.get("uid"))
+            )
+            if not is_valid:
+                print(f"  ⚪ Typ-Mismatch an {d_port}: Erwartet {target}, erkannt: {detected_type} (UID: {detected_uid})")
+                return None
+
+            info["port"] = d_port
+            info["relay_port"] = r_port
+            info["display_type"] = target
+            register_github_mask(info.get("uid"))
+            register_github_mask(info.get("serial_number"))
+            register_github_mask(info.get("mac"))
+            verified[target] = info
+            print(f"  🎯 Bestätigt! {target.upper()} ({mask_uid(info.get('uid'))}) an {d_port} wird sauber durch Relais {r_port} gesteuert.")
+
+        return verified
+
+    @classmethod
+    def verify_and_pair_hardware(cls, timeout_per_relay=6, save_cache=True, required_targets=None, use_cached_first=True):
         """
         Automatische Vorab-Prüfung und Zuordnung:
-          1. Erkennt Displays (CP210x) und Relais (CH340).
-          2. Öffnet alle Display-Ports parallel, leert deren Puffer und lauscht zeitgleich.
-          3. Schaltet jedes Relais einzeln (Display-Ports bleiben dauerhaft geöffnet).
-          4. Erkennt in Echtzeit, welches Display auf den Relais-Puls reagiert hat.
-          5. Liest UID, MAC/Seriennummer, Typ (epd7/epd13) und Firmware aus.
-          6. Verifiziert mindestens ein Display bzw. die in required_targets angeforderten Targets.
+          1. Prüft zuerst die bestehende Zuordnung aus hardware_mapping.json (sofern use_cached_first=True).
+          2. Falls Zuordnung unvollständig oder nicht zutreffend:
+             - Erkennt Displays (CP210x) und Relais (CH340).
+             - Öffnet alle Display-Ports parallel, leert Puffer und schaltet Relais durch.
+             - Erkennt in Echtzeit per USB-Drop oder seriellem Boot-Log, welches Relais welches Display steuert.
+          3. Speichert die verifizierte Zuordnung in hardware_mapping.json.
         """
         print("=" * 65)
         print("🔍 AUTOMATISCHE HARDWARE-VERIFIKATION & RELAIS-ZUORDNUNG")
         print("=" * 65)
 
-        # 0. Vorab-Check der Relais:
+        # 0. Zuerst bekannte Hardware-Map prüfen (sofern vorhanden und nicht explizit erzwungen)
+        if use_cached_first:
+            cached_verified = cls.verify_cached_hardware(targets=required_targets, timeout_per_device=5)
+            if cached_verified:
+                print("\n" + "=" * 65)
+                print("📊 STATUS DER HARDWARE-VERIFIKATION (BESTÄTIGTE ZUORDNUNG):")
+                print("=" * 65)
+                for expected in ["epd7", "epd13"]:
+                    if expected in cached_verified:
+                        info = cached_verified[expected]
+                        print(f"  ✅ {expected.upper()}: Display={info['port']} (CP210x) ➔ Relais={info['relay_port']} (CH340)")
+                        print(f"     UID: {mask_uid(info['uid'])} | SN/MAC: {mask_mac(info['serial_number'])} | Firmware: V{info['version']}")
+                    else:
+                        print(f"  ⚪ {expected.upper()}: Nicht konfiguriert")
+                print("=" * 65)
+                cls._apply_and_save_paired(cached_verified, save_cache=save_cache)
+                return cached_verified
+            else:
+                print("ℹ️ Gespeicherte Zuordnung nicht vollständig bestätigt, starte vollständigen Relais-Suchlauf...")
+
+        # 1. Vorab-Check der Relais:
         # Falls Relais aus einem vorherigen Testlauf noch auf AUS stehen,
         # haben die CP210x-Chips der Displays keine 5V-Versorgung und sind für Windows unsichtbar.
         # Daher aktivieren wir vorab alle erkannten CH340-Relais und warten kurz auf die USB-Enumeration.
@@ -614,40 +763,74 @@ class ESP32HardwareController:
 
             dropped = (ports_before - ports_after) & set(remaining_ports)
             booted_port = None
+            display_info = None
+
             if len(dropped) == 1:
                 booted_port = list(dropped)[0]
-                print(f"  🎯 Eindeutiger Treffer! Relais {r_port} steuert Display an {booted_port}")
-            else:
-                # Fallback: Falls die USB-Bridge extern mit Strom versorgt wird und nicht trennt,
-                # lauschen wir seriell auf Neustart-Logs nach einem Power-Puls.
-                print(f"  ℹ️ Kein eindeutiger USB-Port-Drop ({dropped}), nutze seriellen Log-Handshake...")
-                cls.pulse_relay(r_port, off_duration=1.0)
-                time.sleep(0.3)
-                start_t = time.time()
-                while (time.time() - start_t) < timeout_per_relay:
-                    for d_port in remaining_ports:
-                        try:
-                            with cls(d_port, baudrate=115200, name=f"Probe-{d_port}") as ctrl:
-                                with ctrl._lock:
-                                    logs = list(ctrl.log_history)
-                                if any("[MAIN] INIT" in l or "[MAIN] UID" in l or "Button wake" in l for l in logs):
-                                    booted_port = d_port
-                                    print(f"  🎯 Eindeutiger Treffer via Serial-Log! Relais {r_port} steuert Display an {booted_port}")
-                                    break
-                        except Exception:
-                            pass
-                    if booted_port:
-                        break
-                    time.sleep(0.2)
-
-            if booted_port:
+                print(f"  🎯 Eindeutiger Hardware-Treffer! Relais {r_port} steuert Display an {booted_port}")
                 time.sleep(0.5)
                 try:
                     with cls(booted_port, baudrate=115200, name=f"Probe-{booted_port}", relay_port=r_port) as ctrl:
                         display_info = ctrl.read_device_identity(reset=True, timeout=6, fallback_esptool=False)
                 except Exception as e:
                     print(f"  ⚠️ Hinweis beim Lesen der Identität an {booted_port}: {e}")
-                    display_info = {"display_type": "unknown", "uid": f"dev-{booted_port.lower()}"}
+            else:
+                # 2. Fallback: Falls die USB-Bridge dauerhaft mit Strom versorgt wird (kein USB-Port-Drop),
+                # öffnen wir alle verbleibenden Ports DAUERHAFT VOR dem Relais-Puls und lauschen auf Boot-Logs.
+                print(f"  ℹ️ Kein USB-Port-Drop erkannt, lausche seriell auf Boot-Logs an {remaining_ports}...")
+                open_ctrls = {}
+                for d_port in remaining_ports:
+                    try:
+                        c = cls(d_port, baudrate=115200, name=f"Probe-{d_port}", relay_port=r_port)
+                        c.connect()
+                        c.clear_logs()
+                        open_ctrls[d_port] = c
+                    except Exception as e:
+                        print(f"  ⚠️ Konnte Port {d_port} nicht vorab öffnen: {e}")
+
+                try:
+                    time.sleep(0.3)
+                    for c in open_ctrls.values():
+                        c.clear_logs()
+
+                    # Relais pulsen (1.2s für zuverlässige Trennung)
+                    cls.pulse_relay(r_port, off_duration=1.2, name=r_port)
+
+                    start_t = time.time()
+                    while (time.time() - start_t) < timeout_per_relay:
+                        for d_port, c in open_ctrls.items():
+                            with c._lock:
+                                logs = list(c.log_history)
+                            if any(
+                                "[MAIN]" in l
+                                or "rst:0x" in l
+                                or "boot:0x" in l
+                                or "Button wake" in l
+                                or "[WAKE]" in l
+                                for l in logs
+                            ):
+                                booted_port = d_port
+                                print(f"  🎯 Eindeutiger Treffer via Serial-Log! Relais {r_port} steuert Display an {booted_port}")
+                                display_info = c.read_device_identity(reset=False, timeout=3, fallback_esptool=False)
+                                break
+                        if booted_port:
+                            break
+                        time.sleep(0.1)
+                finally:
+                    for c in open_ctrls.values():
+                        try:
+                            c.disconnect()
+                        except Exception:
+                            pass
+
+            if booted_port:
+                if not display_info or not display_info.get("uid"):
+                    try:
+                        with cls(booted_port, baudrate=115200, name=f"Probe-{booted_port}", relay_port=r_port) as ctrl:
+                            display_info = ctrl.read_device_identity(reset=True, timeout=6, fallback_esptool=False)
+                    except Exception as e:
+                        print(f"  ⚠️ Hinweis beim Lesen der Identität an {booted_port}: {e}")
+                        display_info = {"display_type": "unknown", "uid": f"dev-{booted_port.lower()}"}
 
                 dtype = display_info.get("display_type", "unknown")
                 uid = display_info.get("uid")
@@ -704,46 +887,7 @@ class ESP32HardwareController:
                     "Bitte Anschlüsse und CH340-Relais überprüfen."
                 )
 
-        # In-Memory config & os.environ aktualisieren
-        try:
-            from . import config
-            if "epd7" in paired:
-                config.EPD7_COM_PORT = paired["epd7"]["port"]
-                config.EPD7_RELAY_PORT = paired["epd7"]["relay_port"]
-                config.EPD7_DEVICE_ID = paired["epd7"]["uid"]
-                os.environ["EPD7_COM_PORT"] = str(paired["epd7"]["port"])
-                if paired["epd7"].get("relay_port"):
-                    os.environ["EPD7_RELAY_PORT"] = str(paired["epd7"]["relay_port"])
-                os.environ["EPD7_DEVICE_ID"] = str(paired["epd7"]["uid"])
-
-            if "epd13" in paired:
-                config.EPD13_COM_PORT = paired["epd13"]["port"]
-                config.EPD13_RELAY_PORT = paired["epd13"]["relay_port"]
-                config.EPD13_DEVICE_ID = paired["epd13"]["uid"]
-                os.environ["EPD13_COM_PORT"] = str(paired["epd13"]["port"])
-                if paired["epd13"].get("relay_port"):
-                    os.environ["EPD13_RELAY_PORT"] = str(paired["epd13"]["relay_port"])
-                os.environ["EPD13_DEVICE_ID"] = str(paired["epd13"]["uid"])
-        except Exception:
-            pass
-
-        if save_cache:
-            cache_file = os.path.join(os.path.dirname(__file__), "hardware_mapping.json")
-            try:
-                merged_data = {}
-                if os.path.isfile(cache_file):
-                    try:
-                        with open(cache_file, "r", encoding="utf-8") as f:
-                            merged_data = json.load(f)
-                    except Exception:
-                        pass
-                valid_paired = {k: v for k, v in paired.items() if k in ("epd7", "epd13")}
-                merged_data.update(valid_paired)
-                with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump(merged_data, f, indent=2)
-            except Exception:
-                pass
-
+        cls._apply_and_save_paired(paired, save_cache=save_cache)
         return paired
 
     @classmethod

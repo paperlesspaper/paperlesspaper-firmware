@@ -97,6 +97,43 @@ def aws_verifier():
         print(f"ℹ️ AWSTestVerifier nicht verfügbar: {e}")
         return None
 
+def verify_device_type_or_abort(device, expected_type: str, info: dict):
+    """
+    Verifiziert, dass das am Port angeschlossene Gerät dem erwarteten Display-Typ entspricht (epd7 vs epd13).
+    Bricht bei Mismatch den gesamten Testlauf sofort via pytest.exit(..., returncode=1) ab.
+    """
+    detected_type = str(info.get("display_type") or "").lower()
+    detected_uid = str(info.get("uid") or "").lower()
+
+    if expected_type == "epd7":
+        if detected_type == "epd13" or detected_uid.startswith("epd13-"):
+            pytest.exit(
+                f"\n🛑 HARDWARE-MISMATCH ABBRUCH:\n"
+                f"   An Port {device.port} wurde ein EPD13 erkannt (UID: {detected_uid or 'unbekannt'}), "
+                f"erwartet wurde jedoch EPD7!\n"
+                f"   ➔ Testlauf wird sofort abgebrochen. Bitte Zuordnung prüfen mit: python -m testbench.run_testbench --verify",
+                returncode=1
+            )
+        elif detected_type == "epd7" or detected_uid.startswith("epd7-"):
+            print(f"✅ [{device.name}] Hardware-Typ erfolgreich verifiziert: EPD7 (UID: {mask_uid(info.get('uid'))})")
+        else:
+            print(f"ℹ️ [{device.name}] Hardware-Typ: {detected_type or 'unbekannt'} (UID: {mask_uid(info.get('uid'))})")
+
+    elif expected_type == "epd13":
+        if detected_type == "epd7" or detected_uid.startswith("epd7-"):
+            pytest.exit(
+                f"\n🛑 HARDWARE-MISMATCH ABBRUCH:\n"
+                f"   An Port {device.port} wurde ein EPD7 erkannt (UID: {detected_uid or 'unbekannt'}), "
+                f"erwartet wurde jedoch EPD13!\n"
+                f"   ➔ Testlauf wird sofort abgebrochen. Bitte Zuordnung prüfen mit: python -m testbench.run_testbench --verify",
+                returncode=1
+            )
+        elif detected_type == "epd13" or detected_uid.startswith("epd13-"):
+            print(f"✅ [{device.name}] Hardware-Typ erfolgreich verifiziert: EPD13 (UID: {mask_uid(info.get('uid'))})")
+        else:
+            print(f"ℹ️ [{device.name}] Hardware-Typ: {detected_type or 'unbekannt'} (UID: {mask_uid(info.get('uid'))})")
+
+
 class TestEPD7Lifecycle:
     """Testzyklus für das 7.5 Zoll Display (EPD7)."""
 
@@ -162,6 +199,13 @@ class TestEPD7Lifecycle:
                 break
             time.sleep(0.5)
 
+        if str(self.device_id).lower().startswith("epd13-"):
+            pytest.exit(
+                f"\n🛑 KONFIGURATIONS-MISMATCH: EPD7 ist mit einer EPD13-UID konfiguriert ({self.device_id})!\n"
+                f"➔ Testlauf wird abgebrochen. Bitte Zuordnung prüfen mit: python -m testbench.run_testbench --verify",
+                returncode=1
+            )
+
         if not port_found:
             pytest.skip(f"Hardware-Port {self.port} für EPD7 nicht angeschlossen (verfügbar: {available_ports}).")
 
@@ -177,6 +221,7 @@ class TestEPD7Lifecycle:
         success = device.factory_reset_via_power_cycles(min_cycles=6)
         assert success is True, "Factory-Reset über 6x Power-Cycles fehlgeschlagen!"
         info = device.read_device_identity(reset=False, timeout=config.BOOT_TIMEOUT)
+        verify_device_type_or_abort(device, "epd7", info)
         if info.get("uid"):
             self.device_id = info["uid"]
             TestEPD7Lifecycle.device_id = info["uid"]
@@ -518,6 +563,13 @@ class TestEPD13Lifecycle:
                 break
             time.sleep(0.5)
 
+        if str(self.device_id).lower().startswith("epd7-"):
+            pytest.exit(
+                f"\n🛑 KONFIGURATIONS-MISMATCH: EPD13 ist mit einer EPD7-UID konfiguriert ({self.device_id})!\n"
+                f"➔ Testlauf wird abgebrochen. Bitte Zuordnung prüfen mit: python -m testbench.run_testbench --verify",
+                returncode=1
+            )
+
         if not port_found:
             pytest.skip(f"Hardware-Port {self.port} für EPD13 nicht angeschlossen (verfügbar: {available_ports}).")
 
@@ -533,6 +585,7 @@ class TestEPD13Lifecycle:
         success = device.factory_reset_via_power_cycles(min_cycles=6)
         assert success is True, "Factory-Reset über 6x Power-Cycles fehlgeschlagen!"
         info = device.read_device_identity(reset=False, timeout=config.BOOT_TIMEOUT)
+        verify_device_type_or_abort(device, "epd13", info)
         if info.get("uid"):
             self.device_id = info["uid"]
             TestEPD13Lifecycle.device_id = info["uid"]

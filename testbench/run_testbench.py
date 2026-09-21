@@ -61,12 +61,28 @@ def isolate_inactive_relays(active_target=None):
         if config.EPD7_RELAY_PORT:
             ESP32HardwareController.set_relay_power(config.EPD7_RELAY_PORT, power_on=True)
 
+def is_mapping_valid_for_target(target):
+    """
+    Prüft, ob für das gewünschte Target bereits eine valide Zuordnung (Display-Port und Relais-Port)
+    in hardware_mapping.json / config vorliegt.
+    """
+    if target == "epd7":
+        return bool(config._epd7_cache.get("port") and config._epd7_cache.get("relay_port"))
+    elif target == "epd13":
+        return bool(config._epd13_cache.get("port") and config._epd13_cache.get("relay_port"))
+    elif target == "all":
+        has_epd7 = bool(config._epd7_cache.get("port") and config._epd7_cache.get("relay_port"))
+        has_epd13 = bool(config._epd13_cache.get("port") and config._epd13_cache.get("relay_port"))
+        return has_epd7 and has_epd13
+    return False
+
 def main():
     parser = argparse.ArgumentParser(description="HIL Testbench CLI Runner")
     parser.add_argument("--target", choices=["epd7", "epd13", "all"], default="all", help="Zielgerät für den Test")
     parser.add_argument("--list-ports", action="store_true", help="Listet alle erkannten COM-Ports auf (CP210x & CH340)")
     parser.add_argument("--verify", action="store_true", help="Prüft Relais-Zuordnung und Vorhandensein von EPD7 und EPD13")
     parser.add_argument("--auto-detect", action="store_true", help="Alias für --verify (Erkennung und Zuordnung)")
+    parser.add_argument("--force-verify", action="store_true", help="Erzwingt vollständige Neu-Kalibrierung aller Relais vor dem Testlauf (ignoriert Cache)")
     parser.add_argument("--skip-check", action="store_true", help="Überspringt die automatische Hardware-Prüfung vor dem Testlauf")
     parser.add_argument("--factory-reset", action="store_true", help="Führt isoliert einen 6x Power-Cycle Factory-Reset auf dem Zielgerät durch")
     parser.add_argument("--run-ota", action="store_true", help="Führt zusätzlich die zeitintensiven OTA-Firmware-Update-Tests aus")
@@ -162,7 +178,7 @@ def main():
 
     if args.verify or args.auto_detect:
         try:
-            ESP32HardwareController.verify_and_pair_hardware(required_targets=target_req)
+            ESP32HardwareController.verify_and_pair_hardware(required_targets=target_req, use_cached_first=not args.force_verify)
             print("\n🎉 Hardware-Setup vollständig und betriebsbereit.")
             sys.exit(0)
         except HardwareSetupError as e:
@@ -170,12 +186,11 @@ def main():
             sys.exit(1)
 
     if args.factory_reset:
-        # Vor dem Factory-Reset Hardware prüfen/verifizieren, um sicherzustellen, dass
-        # die Relais den richtigen Displays zugeordnet sind (insb. bei Multi-Device Setup)
-        if not args.skip_check and not os.environ.get("HIL_SKIP_HARDWARE_CHECK"):
+        # Vor dem Factory-Reset Hardware prüfen/verifizieren nur falls noch keine Zuordnung vorliegt
+        if args.force_verify or (not is_mapping_valid_for_target(args.target) and not args.skip_check and not os.environ.get("HIL_SKIP_HARDWARE_CHECK")):
             try:
                 targets_req = [args.target] if args.target in ("epd7", "epd13") else None
-                ESP32HardwareController.verify_and_pair_hardware(required_targets=targets_req)
+                ESP32HardwareController.verify_and_pair_hardware(required_targets=targets_req, use_cached_first=not args.force_verify)
             except Exception as e:
                 print(f"⚠️ Hinweis bei automatischer Hardware-Prüfung vor dem Factory-Reset: {e}")
 
@@ -195,9 +210,14 @@ def main():
                 print(f"🎉 {name} erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
         sys.exit(0)
 
-    # Automatische Vorab-Prüfung vor jedem Testlauf (Zuordnung Relais <-> Display & EPD7/13)
+    # Automatische Vorab-Prüfung vor jedem Testlauf:
+    # Falls Zuordnung bereits in hardware_mapping.json gecacht ist, überspringen wir das Abklappern aller Relais.
     paired_devices = {}
-    if not args.skip_check and not os.environ.get("HIL_SKIP_HARDWARE_CHECK"):
+    has_valid_config = is_mapping_valid_for_target(args.target)
+
+    if args.force_verify or (not has_valid_config and not args.skip_check and not os.environ.get("HIL_SKIP_HARDWARE_CHECK")):
+        print("\n🔍 Keine vollständige Hardware-Zuordnung vorhanden oder --force-verify gesetzt.")
+        print("   Führe automatische Hardware-Erkennung und Relais-Zuordnung durch...")
         try:
             paired_devices = ESP32HardwareController.verify_and_pair_hardware(required_targets=target_req)
         except HardwareSetupError as e:
@@ -206,15 +226,32 @@ def main():
             sys.exit(1)
         except Exception as e:
             print(f"⚠️ Warnung bei der Hardware-Prüfung: {e}")
+    else:
+        print("\n" + "=" * 65)
+        print("📋 HARDWARE-KONFIGURATION GELADEN (aus hardware_mapping.json)")
+        print("=" * 65)
+        if args.target in ("epd7", "all") and config._epd7_cache.get("port"):
+            print(f"  📺 EPD7:  Display={config.EPD7_COM_PORT} | Relais={config.EPD7_RELAY_PORT} | UID={mask_uid(config.EPD7_DEVICE_ID)}")
+        if args.target in ("epd13", "all") and config._epd13_cache.get("port"):
+            print(f"  📺 EPD13: Display={config.EPD13_COM_PORT} | Relais={config.EPD13_RELAY_PORT} | UID={mask_uid(config.EPD13_DEVICE_ID)}")
+        print("  ⚡ Gespeicherte Zuordnung aktiv – Relais-Scan übersprungen.")
+        print("     (Zum erneuten Kalibrieren aller Relais: --verify oder --force-verify nutzen)")
+        print("=" * 65)
 
     isolate_target = args.target if args.target in ("epd7", "epd13") else None
-    if args.target == "all" and paired_devices:
-        if "epd7" in paired_devices and "epd13" not in paired_devices:
-            isolate_target = "epd7"
-        elif "epd13" in paired_devices and "epd7" not in paired_devices:
-            isolate_target = "epd13"
+    if args.target == "all":
+        if paired_devices:
+            if "epd7" in paired_devices and "epd13" not in paired_devices:
+                isolate_target = "epd7"
+            elif "epd13" in paired_devices and "epd7" not in paired_devices:
+                isolate_target = "epd13"
+        else:
+            if config._epd7_cache.get("port") and not config._epd13_cache.get("port"):
+                isolate_target = "epd7"
+            elif config._epd13_cache.get("port") and not config._epd7_cache.get("port"):
+                isolate_target = "epd13"
 
-    # Nach der Verifikation sofort das Relais des inaktiven Displays abschalten
+    # Nach der Zuordnung sofort das Relais des inaktiven Displays abschalten
     isolate_inactive_relays(active_target=isolate_target)
 
     print_banner()
