@@ -107,7 +107,8 @@ class TestEPD7Lifecycle:
     prod_version = None
 
     @pytest.fixture(scope="class")
-    def device(self):
+    @classmethod
+    def device(cls):
         """Hält den seriellen Port für den gesamten EPD7-Testzyklus dauerhaft offen."""
         available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
         port = config.EPD7_COM_PORT
@@ -152,18 +153,15 @@ class TestEPD7Lifecycle:
 
         try:
             print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{mask_uid(self.device_id)}'...")
+            ble_pattern = r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt|BLE reprovisioning)"
+            ble_timeout = max(config.BLE_READY_TIMEOUT, 60)
             try:
-                device.wait_for_pattern(
-                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                    timeout=8
-                )
+                # E-Paper Refresh (20s) + QR-Code Rendering + WiFi-Scan (5s) benötigt 35-50s
+                device.wait_for_pattern(ble_pattern, timeout=ble_timeout)
             except TimeoutError:
                 print(f"ℹ️ [{device.name}] Display reagiert nicht (Deep Sleep oder Event verpasst). Wecke per Relais auf...")
                 device.reset(method="relay_hex")
-                device.wait_for_pattern(
-                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                    timeout=25
-                )
+                device.wait_for_pattern(ble_pattern, timeout=ble_timeout)
 
             print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD7 (UID: {mask_uid(self.device_id)})...")
             try:
@@ -353,7 +351,8 @@ class TestEPD13Lifecycle:
     prod_version = None
 
     @pytest.fixture(scope="class")
-    def device(self):
+    @classmethod
+    def device(cls):
         """Hält den seriellen Port für den gesamten EPD13-Testzyklus dauerhaft offen."""
         available_ports = [p["port"] for p in ESP32HardwareController.list_ports()]
         port = config.EPD13_COM_PORT
@@ -397,18 +396,15 @@ class TestEPD13Lifecycle:
 
         try:
             print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{mask_uid(self.device_id)}'...")
+            ble_pattern = r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt|BLE reprovisioning)"
+            ble_timeout = max(config.BLE_READY_TIMEOUT, 65)
             try:
-                device.wait_for_pattern(
-                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                    timeout=8
-                )
+                # E-Paper Refresh (20-30s) + QR-Code Rendering + WiFi-Scan (5s) benötigt 40-60s
+                device.wait_for_pattern(ble_pattern, timeout=ble_timeout)
             except TimeoutError:
                 print(f"ℹ️ [{device.name}] Display reagiert nicht (Deep Sleep oder Event verpasst). Wecke per Relais auf...")
                 device.reset(method="relay_hex")
-                device.wait_for_pattern(
-                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                    timeout=25
-                )
+                device.wait_for_pattern(ble_pattern, timeout=ble_timeout)
 
             print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD13 (UID: {mask_uid(self.device_id)})...")
             try:

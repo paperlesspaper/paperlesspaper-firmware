@@ -333,6 +333,78 @@ def load_env_file():
     return env_vars
 
 
+def extract_risk_summary(report_text):
+    """Extrahiert Gesamtbewertung, Release-Empfehlung und Kernaussage aus dem Bericht."""
+    rating = "🟢 GERING (LOW)"
+    if "HOCH (HIGH)" in report_text or ("🔴" in report_text and "HOCH" in report_text):
+        rating = "🔴 HOCH (HIGH)"
+    elif "MITTEL (MEDIUM)" in report_text or ("🟡" in report_text and "MITTEL" in report_text):
+        rating = "🟡 MITTEL (MEDIUM)"
+    elif "GERING (LOW)" in report_text or ("🟢" in report_text and "GERING" in report_text):
+        rating = "🟢 GERING (LOW)"
+
+    m_rating = re.search(r"Gesamtbewertung:\s*([^\n\r]+)", report_text, re.IGNORECASE)
+    if m_rating:
+        val = m_rating.group(1).strip().strip("[]*").strip()
+        if val:
+            rating = val
+
+    recommendation = "GENEHMIGT"
+    if "BLOCKIERT" in report_text:
+        recommendation = "BLOCKIERT"
+    elif "MANUELLE PRÜFUNG" in report_text:
+        recommendation = "MANUELLE PRÜFUNG EMPFOHLEN"
+
+    m_rec = re.search(r"Empfehlung:\s*([^\n\r]+)", report_text, re.IGNORECASE)
+    if m_rec:
+        val = m_rec.group(1).strip().strip("[]*").strip()
+        if val:
+            recommendation = val
+
+    diff_summary = ""
+    m = re.search(r"### 1\.\s*🔍\s*Bewertung der aktuellen Code-Änderungen.*?\n(.*?)(?=\n---\n|\n### 2|\Z)", report_text, re.DOTALL)
+    if m:
+        diff_summary = m.group(1).strip()
+    else:
+        m_alt = re.search(r"(?:Bewertung der aktuellen Code-Änderungen|Git-Diff).*?\n(.*?)(?=\n---\n|\n### 2|\Z)", report_text, re.DOTALL | re.IGNORECASE)
+        if m_alt:
+            diff_summary = m_alt.group(1).strip()
+
+    return {
+        "rating": rating,
+        "recommendation": recommendation,
+        "diff_summary": diff_summary,
+    }
+
+
+def format_summary_markdown(report_text, summary_info):
+    """Erzeugt die kompakte Markdown-Zusammenfassung mit einklappbarem Detailbericht (wie im HIL-Bericht)."""
+    lines = [
+        "## 🛡️ Pre-Flight KI-Risikoanalyse (Zusammenfassung)",
+        "",
+        f"- **Gesamtbewertung:** {summary_info['rating']}",
+        f"- **Release-Empfehlung:** {summary_info['recommendation']}",
+    ]
+    if summary_info["diff_summary"]:
+        lines.extend([
+            "",
+            "**Kernaussage zu den Code-Änderungen:**",
+            summary_info["diff_summary"],
+        ])
+
+    lines.extend([
+        "",
+        "<details>",
+        "<summary>🔍 <b>Vollständigen Pre-Flight Audit-Bericht anzeigen</b></summary>",
+        "",
+        report_text,
+        "",
+        "</details>",
+        ""
+    ])
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description="KI-Firmware Risikoanalyse & Gesamtsystem-Audit via Google Gemini API")
     parser.add_argument("--base", help="Git Basis-Ref für den Diff (z.B. origin/main oder HEAD~1)")
@@ -382,20 +454,38 @@ def main():
 
     try:
         report, used_model = call_gemini(diff_text, codebase_text, api_key)
-        print(f"✨ Verwendetes Modell: {used_model}")
+        print(f"✨ Verwendetes Modell: {used_model}\n")
+
+        summary_info = extract_risk_summary(report)
+        summary_md = format_summary_markdown(report, summary_info)
+
+        # Kompakte Zusammenfassung im Konsolen-Log
+        print("=" * 65)
+        print("🛡️ PRE-FLIGHT KI-RISIKOANALYSE (ZUSAMMENFASSUNG)")
+        print("=" * 65)
+        print(f"  📊 Gesamtbewertung:    {summary_info['rating']}")
+        print(f"  🚦 Release-Empfehlung: {summary_info['recommendation']}")
+        if summary_info["diff_summary"]:
+            print("\n📝 Kernaussage zu den Code-Änderungen:")
+            print(summary_info["diff_summary"])
+        print("=" * 65)
+
+        # Ausklappbare Details im GitHub Actions Log via Workflow-Command ::group::
+        print("\n::group::🔍 Vollständigen Pre-Flight Audit-Bericht anzeigen")
         print(report)
+        print("::endgroup::")
 
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
                 f.write(report)
-            print(f"\n📄 Bericht gespeichert in: {args.output}")
+            print(f"\n📄 Vollständiger Bericht gespeichert in: {args.output}")
 
-        # In GitHub Actions Step Summary einbinden
+        # In GitHub Actions Step Summary (wie im HIL-Bericht: Zusammenfassung + ausklappbare Details)
         github_summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if github_summary:
             try:
                 with open(github_summary, "a", encoding="utf-8") as gf:
-                    gf.write(f"\n\n{report}\n")
+                    gf.write(f"\n\n{summary_md}\n")
             except Exception as e:
                 print(f"Hinweis: GitHub Step Summary konnte nicht geschrieben werden: {e}")
 
