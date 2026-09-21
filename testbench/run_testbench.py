@@ -39,6 +39,29 @@ def print_banner():
     print(f"  - Reset-Methode: {config.RESET_METHOD}")
     print("=" * 65)
 
+def isolate_relays(active_target=None):
+    """
+    Schaltet am Anfang immer beide Relais ab, damit nur das jeweils aktive
+    Testgerät mit Strom versorgt wird und keine Querstörungen auftreten.
+    """
+    print("\n" + "=" * 65)
+    print("⚡ [Hardware-Isolation] Schalte am Anfang alle Relais AUS...")
+    print("=" * 65)
+    if config.EPD7_RELAY_PORT:
+        ESP32HardwareController.set_relay_power(config.EPD7_RELAY_PORT, power_on=False)
+    if config.EPD13_RELAY_PORT:
+        ESP32HardwareController.set_relay_power(config.EPD13_RELAY_PORT, power_on=False)
+    time.sleep(0.5)
+
+    if active_target == "epd7" and config.EPD7_RELAY_PORT:
+        print(f"⚡ [Hardware-Isolation] Schalte Relais für Zielgerät EPD7 ({config.EPD7_RELAY_PORT}) AN...")
+        ESP32HardwareController.set_relay_power(config.EPD7_RELAY_PORT, power_on=True)
+        time.sleep(0.3)
+    elif active_target == "epd13" and config.EPD13_RELAY_PORT:
+        print(f"⚡ [Hardware-Isolation] Schalte Relais für Zielgerät EPD13 ({config.EPD13_RELAY_PORT}) AN...")
+        ESP32HardwareController.set_relay_power(config.EPD13_RELAY_PORT, power_on=True)
+        time.sleep(0.3)
+
 def main():
     parser = argparse.ArgumentParser(description="HIL Testbench CLI Runner")
     parser.add_argument("--target", choices=["epd7", "epd13", "all"], default="all", help="Zielgerät für den Test")
@@ -166,10 +189,12 @@ def main():
             if port not in available:
                 print(f"⚠️ Port {port} für {name} nicht angeschlossen - überspringe.")
                 continue
+            isolate_relays(active_target=t)
             print(f"\n🏭 Führe 6x Power-Cycle Factory-Reset für {name} an Port {port} (Relais {relay}) durch...")
             with ESP32HardwareController(port, name=name, relay_port=relay) as dev:
                 dev.factory_reset_via_power_cycles(min_cycles=6)
                 print(f"🎉 {name} erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
+        isolate_relays(active_target=None)
         sys.exit(0)
 
     # Automatische Vorab-Prüfung vor jedem Testlauf (Zuordnung Relais <-> Display & EPD7/13)
@@ -218,9 +243,24 @@ def main():
     if args.junitxml:
         pytest_args.append(f"--junitxml={args.junitxml}")
 
-    clean_pytest_args = [mask_path(a) for a in pytest_args]
-    print(f"🚀 Starte PyTest mit Argumenten: {clean_pytest_args}\n")
-    exit_code = pytest.main(pytest_args)
+    isolate_target = args.target if args.target in ("epd7", "epd13") else None
+    if args.target == "all" and paired_devices:
+        if "epd7" in paired_devices and "epd13" not in paired_devices:
+            isolate_target = "epd7"
+        elif "epd13" in paired_devices and "epd7" not in paired_devices:
+            isolate_target = "epd13"
+
+    try:
+        isolate_relays(active_target=isolate_target)
+        clean_pytest_args = [mask_path(a) for a in pytest_args]
+        print(f"🚀 Starte PyTest mit Argumenten: {clean_pytest_args}\n")
+        exit_code = pytest.main(pytest_args)
+    finally:
+        print("\n⚡ [Hardware-Isolation] Beende Testlauf: Schalte alle Relais AUS...")
+        if config.EPD7_RELAY_PORT:
+            ESP32HardwareController.set_relay_power(config.EPD7_RELAY_PORT, power_on=False)
+        if config.EPD13_RELAY_PORT:
+            ESP32HardwareController.set_relay_power(config.EPD13_RELAY_PORT, power_on=False)
 
     print("=" * 65)
     if exit_code == 0:
