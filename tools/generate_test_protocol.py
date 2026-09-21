@@ -36,13 +36,16 @@ except ImportError:
     from ai_failure_analysis import sanitize_log, analyze_failure
 
 PHASE_TITLES = {
-    "test_00": "Phase 0: Factory-Reset (6x Power-Cycles)",
+    "test_00": "Phase 0: Initialer Factory-Reset (6x Power-Cycles & Deaktivierung)",
     "test_01": "Phase 1: BLE-WLAN-Provisionierung",
-    "test_02": "Phase 2: Produktions-Firmware OTA (Manifest JSON)",
-    "test_03": "Phase 3: Kandidaten-Firmware OTA & S3-Bereinigung",
-    "test_04": "Phase 4: Autonome REST-Aktivierung & Handshake",
-    "test_05": "Phase 5: Presigned URL Bild-Upload, Rendering & Quittung",
-    "test_06": "Phase 6: REST-Deaktivierung & Deep Sleep"
+    "test_02": "Phase 2: Autonome REST-Aktivierung & Handshake",
+    "test_03": "Phase 3: Produktions-Firmware OTA (Manifest JSON)",
+    "test_04": "Phase 4: Kandidaten-Firmware OTA & S3-Bereinigung",
+    "test_05": "Phase 5: Kandidaten Factory-Reset & Deaktivierung",
+    "test_06": "Phase 6: Kandidaten BLE-WLAN-Provisionierung",
+    "test_07": "Phase 7: Kandidaten REST-Aktivierung & Handshake",
+    "test_08": "Phase 8: Presigned URL Bild-Upload, Rendering & Quittung",
+    "test_09": "Phase 9: REST-Deaktivierung & Deep Sleep"
 }
 
 def parse_junit_xml(xml_path):

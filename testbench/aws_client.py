@@ -519,9 +519,12 @@ class AWSTestVerifier:
 
         last_error = None
         for thing in thing_candidates:
-            # 1. AWS IoT Named Shadow 'settings' setzen
+            # 1. AWS IoT Named Shadow 'settings' setzen (sowohl desired als auch reported)
             shadow_payload = {
                 "state": {
+                    "desired": {
+                        "otaUrl": ota_url
+                    },
                     "reported": {
                         "otaUrl": ota_url
                     }
@@ -558,6 +561,37 @@ class AWSTestVerifier:
         if last_error:
             raise last_error
         return True
+
+    def clear_ota_shadow(self, device_id):
+        """Bereinigt die otaUrl im Named Shadow 'settings', um wiederholte OTA-Schleifen zu verhindern."""
+        thing_candidates = [str(device_id)]
+        if not device_id.startswith(("epd7-", "epd13-")):
+            thing_candidates.extend([f"epd7-{device_id}", f"epd13-{device_id}"])
+
+        for thing in thing_candidates:
+            shadow_payload = {
+                "state": {
+                    "desired": {
+                        "otaUrl": ""
+                    },
+                    "reported": {
+                        "otaUrl": ""
+                    }
+                }
+            }
+            try:
+                self.iot_data.update_thing_shadow(
+                    thingName=thing,
+                    shadowName="settings",
+                    payload=json.dumps(shadow_payload)
+                )
+                print(f"🧹 [OTA] Shadow 'settings.otaUrl' für '{mask_uid(thing)}' bereinigt.")
+                return True
+            except ClientError as e:
+                err_code = e.response.get("Error", {}).get("Code")
+                if err_code != "ResourceNotFoundException":
+                    print(f"⚠️ Warnung beim Bereinigen des Shadows für {mask_uid(thing)}: {e}")
+        return False
 
     def trigger_ota_via_shadow(self, device_id, ota_manifest_url):
         """Kompatibilitäts-Alias für trigger_ota."""
