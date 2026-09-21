@@ -7,9 +7,10 @@ Hardware-in-the-Loop (HIL) Testsuite für ESP32-C6 basierte E-Paper Displays (**
 ## 🏗️ Hardware-Setup & Architektur
 
 * **Displays:** ESP32-C6 Boards, angeschlossen über **Silicon Labs CP210x** USB-zu-UART Bridges.
-* **Stromversorgung & Reset:** Schaltung über **CH340 USB-Relais** (`relay_hex`), da DTR/RTS hardwareseitig nicht angebunden sind.
+* **Stromversorgung & Reset:** Schaltung über **CH340 USB-Relais** (`relay_hex`), da DTR/RTS hardwareseitig nicht angebunden sind. Das Display wechselt bei Inaktivität oder fehlendem WLAN autonom in den Deep Sleep; alle Testschritte (inkl. BLE-Provisionierung) nutzen automatische Relais-Wakeups bei ausbleibenden UART-Logs.
+* **Robuste COM-Port-Kommunikation auf Windows-Runnern:** Der `ESP32HardwareController` fängt USB-Re-Enumerationen nach Relais-Schaltzyklen durch automatische Verbindungs-Retries ab und schließt serielle Handles erst nach Beendigung des Hintergrund-Reader-Threads, um Win32-Driver-Locks zuverlässig zu vermeiden.
 * **Automatische Zuordnung (`verify_and_pair_hardware`):**
-  Die Testbench erkennt alle CP210x- und CH340-Ports automatisch, schaltet jedes Relais kurz stromlos und analysiert die seriellen Boot-Logs (`[MAIN] INIT Device V: ...`), um Relais-Port, Display-Port, MAC-Adresse und Display-Typ (EPD7 vs. EPD13) zuzuordnen. Die Zuordnung wird in `testbench/hardware_mapping.json` (git-ignoriert) gecacht.
+  Die Testbench erkennt alle CP210x- und CH340-Ports automatisch, schaltet jedes Relais kurz stromlos und analysiert die seriellen Boot-Logs (`[MAIN] INIT Device V: ...`), um Relais-Port, Display-Port, MAC-Adresse und Display-Typ (EPD7 vs. EPD13) zuzuordnen. Die Zuordnung wird in `testbench/hardware_mapping.json` (git-ignoriert) gemerged und gecacht sowie als Umgebungsvariablen (`EPD7_COM_PORT`, etc.) bereitgestellt.
 
 ```
 +--------------------------------------------------------------------+
@@ -187,7 +188,7 @@ python tools/canary_monitor.py --device-ids "epd7-xxxx,epd13-yyyy" --reset --wat
 | Phase | Testfall | Beschreibung |
 | :--- | :--- | :--- |
 | **0** | `test_00_factory_reset_via_power_cycles` | Setzt das Gerät vor dem Test durch mindestens 6 aufeinanderfolgende Relais-Power-Cycles auf Werkseinstellungen zurück (`StartCounter >= 5`) und verifiziert `[MAIN] Reset - ACT 1 \| WIFI 1`. |
-| **1** | `test_01_ble_wifi_provisioning` | Prüft BLE-Advertising des werksfrischen Geräts, liest gescannte Netze via GATT und überträgt WLAN-Zugangsdaten. |
+| **1** | `test_01_ble_wifi_provisioning` | Prüft BLE-Advertising des werksfrischen Geräts (inkl. automatischem Relais-Wakeup bei Deep Sleep), liest gescannte Netze via GATT und überträgt WLAN-Zugangsdaten. |
 | **2** | `test_02_production_firmware_ota` | Flasht die offizielle Produktions-Firmware via OTA-Manifest JSON (`http://<bucket-domain>/espfota_<target>.json`) und verifiziert den Reboot in Produktionsversion (z.B. V3.0.17). |
 | **3** | `test_03_candidate_firmware_ota` | Lädt das frisch gebuildete Firmware-Binary temporär als `test-firmware-<target>.bin` nach S3 hoch, triggert Direkt-OTA via URL, verifiziert den Reboot in die Kandidaten-Version und löscht die Test-Binärdatei anschließend sofort wieder aus S3. |
 | **4** | `test_04_device_activation` | Ruft REST-API `POST /activatedevice` auf, wartet auf autonomen Handshake des Displays (`[AWS RX] Device is activated`) ohne Relais-Reset und validiert in DynamoDB `iotCatalog`. |

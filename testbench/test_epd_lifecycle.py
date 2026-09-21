@@ -126,6 +126,7 @@ class TestEPD7Lifecycle:
                 self.device_id = info["uid"]
                 TestEPD7Lifecycle.device_id = info["uid"]
                 config.EPD7_DEVICE_ID = info["uid"]
+                os.environ["EPD7_DEVICE_ID"] = info["uid"]
             register_github_mask(self.device_id)
             print(f"🎉 [EPD7] Testgerät '{mask_uid(self.device_id)}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
 
@@ -137,10 +138,18 @@ class TestEPD7Lifecycle:
         try:
             with ESP32HardwareController(self.port, name="EPD7", relay_port=self.relay_port) as device:
                 print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{mask_uid(self.device_id)}'...")
-                device.wait_for_pattern(
-                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                    timeout=30
-                )
+                try:
+                    device.wait_for_pattern(
+                        r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
+                        timeout=8
+                    )
+                except TimeoutError:
+                    print(f"ℹ️ [{device.name}] Display reagiert nicht (Deep Sleep oder Event verpasst). Wecke per Relais auf...")
+                    device.reset(method="relay_hex")
+                    device.wait_for_pattern(
+                        r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
+                        timeout=25
+                    )
 
             print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD7 (UID: {mask_uid(self.device_id)})...")
             try:
@@ -353,6 +362,7 @@ class TestEPD13Lifecycle:
                 self.device_id = info["uid"]
                 TestEPD13Lifecycle.device_id = info["uid"]
                 config.EPD13_DEVICE_ID = info["uid"]
+                os.environ["EPD13_DEVICE_ID"] = info["uid"]
             register_github_mask(self.device_id)
             print(f"🎉 [EPD13] Testgerät '{mask_uid(self.device_id)}' erfolgreich per 6x Power-Cycles auf Werkseinstellungen zurückgesetzt.")
 
@@ -364,10 +374,18 @@ class TestEPD13Lifecycle:
         try:
             with ESP32HardwareController(self.port, name="EPD13", relay_port=self.relay_port) as device:
                 print(f"⏳ [{device.name}] Warte auf BLE Bereitschaft für '{mask_uid(self.device_id)}'...")
-                device.wait_for_pattern(
-                    r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
-                    timeout=30
-                )
+                try:
+                    device.wait_for_pattern(
+                        r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
+                        timeout=8
+                    )
+                except TimeoutError:
+                    print(f"ℹ️ [{device.name}] Display reagiert nicht (Deep Sleep oder Event verpasst). Wecke per Relais auf...")
+                    device.reset(method="relay_hex")
+                    device.wait_for_pattern(
+                        r"(?:\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|Provisioning attempt)",
+                        timeout=25
+                    )
 
             print(f"\n📡 Starte Test: BLE-WLAN-Provisionierung für EPD13 (UID: {mask_uid(self.device_id)})...")
             try:

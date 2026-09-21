@@ -50,25 +50,32 @@ class ESP32HardwareController:
         if serial is None:
             raise RuntimeError("Das Modul 'pyserial' ist nicht installiert. Bitte 'pip install pyserial' ausführen.")
 
-        try:
-            self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
-            self._running = True
-            self._thread = threading.Thread(target=self._reader_loop, daemon=True)
-            self._thread.start()
-            print(f"🔌 [{self.name}] Verbunden mit {self.port} @ {self.baudrate} Baud.")
-        except Exception as e:
-            raise ConnectionError(f"[{self.name}] Konnte nicht mit {self.port} verbinden: {e}")
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
+                self._running = True
+                self._thread = threading.Thread(target=self._reader_loop, daemon=True)
+                self._thread.start()
+                print(f"🔌 [{self.name}] Verbunden mit {self.port} @ {self.baudrate} Baud.")
+                return
+            except Exception as e:
+                last_err = e
+                if attempt < 3:
+                    time.sleep(0.5)
+
+        raise ConnectionError(f"[{self.name}] Konnte nicht mit {self.port} verbinden: {last_err}")
 
     def disconnect(self):
         """Schließt den seriellen Port und beendet den Hintergrund-Reader."""
         self._running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
         if self.ser and self.ser.is_open:
             try:
                 self.ser.close()
             except Exception:
                 pass
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
         print(f"🔌 [{self.name}] Verbindung zu {self.port} getrennt.")
 
     def clear_logs(self):
@@ -195,11 +202,10 @@ class ESP32HardwareController:
                 self.disconnect()
 
             self.pulse_relay(target_relay)
-            time.sleep(0.5)
+            time.sleep(0.8)
 
             if was_open:
                 self.connect()
-                self.clear_logs()
 
             print(f"✅ [{self.name}] USB-Relais Power-Cycle erfolgreich.")
 
@@ -596,26 +602,42 @@ class ESP32HardwareController:
                     "Bitte Anschlüsse und CH340-Relais überprüfen."
                 )
 
-        # In-Memory config aktualisieren
+        # In-Memory config & os.environ aktualisieren
         try:
             from . import config
             if "epd7" in paired:
                 config.EPD7_COM_PORT = paired["epd7"]["port"]
                 config.EPD7_RELAY_PORT = paired["epd7"]["relay_port"]
                 config.EPD7_DEVICE_ID = paired["epd7"]["uid"]
+                os.environ["EPD7_COM_PORT"] = str(paired["epd7"]["port"])
+                if paired["epd7"].get("relay_port"):
+                    os.environ["EPD7_RELAY_PORT"] = str(paired["epd7"]["relay_port"])
+                os.environ["EPD7_DEVICE_ID"] = str(paired["epd7"]["uid"])
 
             if "epd13" in paired:
                 config.EPD13_COM_PORT = paired["epd13"]["port"]
                 config.EPD13_RELAY_PORT = paired["epd13"]["relay_port"]
                 config.EPD13_DEVICE_ID = paired["epd13"]["uid"]
+                os.environ["EPD13_COM_PORT"] = str(paired["epd13"]["port"])
+                if paired["epd13"].get("relay_port"):
+                    os.environ["EPD13_RELAY_PORT"] = str(paired["epd13"]["relay_port"])
+                os.environ["EPD13_DEVICE_ID"] = str(paired["epd13"]["uid"])
         except Exception:
             pass
 
         if save_cache:
             cache_file = os.path.join(os.path.dirname(__file__), "hardware_mapping.json")
             try:
+                merged_data = {}
+                if os.path.isfile(cache_file):
+                    try:
+                        with open(cache_file, "r", encoding="utf-8") as f:
+                            merged_data = json.load(f)
+                    except Exception:
+                        pass
+                merged_data.update(paired)
                 with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump(paired, f, indent=2)
+                    json.dump(merged_data, f, indent=2)
             except Exception:
                 pass
 
