@@ -99,7 +99,7 @@ The ESP32-C6 firmware exposes a GATT server (implemented via NimBLE) primarily f
 
 | Service | Service UUID | Characteristic | Characteristic UUID | Properties | Format / Data Type | Description & Function |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Device Data Service** | `7f74170e-7b0e-11ed-a1eb-0242ac120002` | **WiFi Connected Status** | `4c578d4c-7b0e-11ed-a1eb-0242ac120002` | `READ` | `uint8` (`0` or `1`) | Indicates the connection state (`1` = connected, `0` = disconnected/connecting). Polled during provisioning to confirm success. |
+| **Device Data Service** | `7f74170e-7b0e-11ed-a1eb-0242ac120002` | **WiFi Connected Status** | `4c578d4c-7b0e-11ed-a1eb-0242ac120002` | `READ` | `uint8` (`0` or `1`) | Connection state (`1` = connected / connecting, `0` = disconnected / failed). Set to `1` during the connection attempt, reverts back to `0` if connection fails after 10s. Remains `1` upon success until BLE shuts down. |
 | | | **WiFi Scan Results** | `5131a3fc-7b0e-11ed-a1eb-0242ac120002` | `READ` | UTF-8 String (Descriptor `2904`) | List of scanned networks in the format `SSID´RSSI´´SSID´RSSI´´...` (max. ~460 bytes). |
 | **WiFi Configuration Service** | `0515c086-7b0c-11ed-a1eb-0242ac120002` | **WiFi SSID** | `090b0ef2-7b0d-11ed-a1eb-0242ac120002` | `READ`, `WRITE` | UTF-8 String (Descriptor `2904`) | Target WiFi SSID. Writing sets the SSID for connection and flash storage (max. 35 chars). |
 | | | **WiFi Password** | `a62eed84-7b0d-11ed-a1eb-0242ac120002` | `READ`, `WRITE` | UTF-8 String (Descriptor `2904`) | Target WiFi Password (max. 65 chars). Writing both SSID and password triggers immediate WiFi connection. |
@@ -117,9 +117,13 @@ The ESP32-C6 firmware exposes a GATT server (implemented via NimBLE) primarily f
 4. **Write Credentials**:
    * Write target SSID as UTF-8 string to `090b0ef2-7b0d-11ed-a1eb-0242ac120002`.
    * Write target Password as UTF-8 string to `a62eed84-7b0d-11ed-a1eb-0242ac120002`.
-5. **Verify Connection**: Poll the status characteristic `4c578d4c-7b0e-11ed-a1eb-0242ac120002`. When it reads `1`, WiFi is verified and saved permanently into flash memory. The ESP32 will disconnect and shut down BLE.
+5. **Verify Connection & Status Behavior**:
+   * Once both SSID and password are received, the firmware sets `4c578d4c-7b0e-11ed-a1eb-0242ac120002` to `1` and attempts to connect for up to 10 seconds (`WiFi.waitForConnectResult(10000)`).
+   * **If connection succeeds:** The characteristic **remains `1`**. Credentials are saved permanently to Flash (EEPROM addresses 0 & 40), and the ESP32 disables BLE (`BleInit(..., false)`).
+   * **If credentials are wrong / connection fails:** The firmware disconnects from WiFi, clears the temporary password buffer, and resets the status characteristic **back to `0`**. The device remains in BLE advertising mode to allow a retry.
+   * **Client Tip:** Clients should poll the status characteristic for 10–12 seconds. If it drops back to `0`, prompt the user to re-enter credentials. If it stays `1` (or the BLE connection closes upon successful handover), provisioning succeeded.
 
-*(A ready-to-use Python client for this workflow is provided in [`testbench/ble_provisioner.py`](testbench/ble_provisioner.py).)*
+*(A ready-to-use Python client implementing this validation logic is provided in [`testbench/ble_provisioner.py`](testbench/ble_provisioner.py).)*
 
 #### 2. BLE OTA Firmware Update Workflow
 1. **Start Update**: Write command string `"START_FW"` to `10000004-0000-0000-0000-000000000001`. This initializes the OTA partition update and allocates an internal 19,200-byte RAM buffer.
