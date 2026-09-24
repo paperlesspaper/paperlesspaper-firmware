@@ -645,7 +645,7 @@ bool wifiSmart() {
       if (doReset && i >= 1) {
          break;  // leave wifi search quick on reset
       }
-      if (wifiSettings.ssid.length() < 2) {
+      if (wifiSettings.ssid.length() < 1) {
          Serial.println("[NETWORK] Stop connect because no wifi set");
          break;
       }
@@ -693,7 +693,7 @@ bool wifiSmart() {
             Serial.printf("\n[NETWORK] BLE reprovisioning is over, sleep: %d s\n", settings.timeout);
             break;
          }
-         if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
+         if (wifiSettings.bleSSID.length() > 0 && wifiSettings.blePASS.length() > 1) {
             Serial.println("[NETWORK] reprovisioning got all BLE, try");
             writeIntToFlash(0, 140);  // reset reconnect counter
             isReconnect = true;
@@ -737,7 +737,7 @@ bool wifiSmart() {
             break;
          }
          // try to connect wifi if ble data is set
-         if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
+         if (wifiSettings.bleSSID.length() > 0 && wifiSettings.blePASS.length() > 1) {
             Serial.println("[NETWORK] got all BLE, try to connect with data");
             wifiSettings.wifiIsConnected = true;
             wifiConnectedCharacteristic->setValue(wifiSettings.wifiIsConnected);
@@ -771,7 +771,7 @@ bool wifiSmart() {
          delay(500);
          if (wifiRetryCount > 20) {
             wifiRetryCount = 0;
-            if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
+            if (wifiSettings.bleSSID.length() > 0 && wifiSettings.blePASS.length() > 1) {
                WiFi.begin(wifiSettings.bleSSID.c_str(), wifiSettings.blePASS.c_str());
             } else {
                WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
