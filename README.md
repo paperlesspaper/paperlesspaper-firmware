@@ -72,11 +72,64 @@ This project is released under the GNU General Public License v3.0 (GPL-3.0). Se
 ## Usage Limits & Cloud Connectivity
 
 *   **AWS IoT**: This firmware heavily relies on AWS IoT Core for activation, status updates, and image retrieval. Ensure your AWS account is set up and limits/costs are monitored.
-*   **BLE Advertising**: The device advertises via BLE for provisioning. Advertising restarts automatically after a client disconnects.
+*   **BLE Advertising**: The device advertises via BLE for provisioning and OTA updates. Advertising restarts automatically after a client disconnects.
 *   **Deep Sleep**: The device enters deep sleep to save power. It wakes up via:
     *   Timer (configurable via MQTT).
     *   Accelerometer (motion).
     *   Button press.
+
+## 📶 Bluetooth Low Energy (BLE) Interface
+
+The ESP32-C6 firmware exposes a GATT server (implemented via NimBLE) primarily for **WiFi onboarding / provisioning** and **OTA firmware updates**.
+
+### Device Advertising & Discovery
+* **Advertised Device Name**: Matches the unique device ID (e.g. `epd7-A0B1C2D3E4F5` or `epd13-A0B1C2D3E4F5`).
+* **Advertised Service UUIDs**:
+  * Device Data Service (`7f74170e-7b0e-11ed-a1eb-0242ac120002`)
+  * WiFi Configuration Service (`0515c086-7b0c-11ed-a1eb-0242ac120002`)
+  * E-Paper Settings / Firmware Update Service (`10000000-0000-0000-0000-000000000001`)
+* **When BLE is Active**:
+  * On first boot or when no valid WiFi credentials exist in flash.
+  * When WiFi connection fails and the device was woken up via button (`buttonWake`).
+  * BLE terminates automatically after successful WiFi connection or when the timeout is reached (device returns to deep sleep).
+
+---
+
+### GATT Services & Characteristics Overview
+
+| Service | Service UUID | Characteristic | Characteristic UUID | Properties | Format / Data Type | Description & Function |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Device Data Service** | `7f74170e-7b0e-11ed-a1eb-0242ac120002` | **WiFi Connected Status** | `4c578d4c-7b0e-11ed-a1eb-0242ac120002` | `READ` | `uint8` (`0` or `1`) | Connection state (`1` = connected / connecting, `0` = disconnected / failed). Set to `1` during the connection attempt, reverts back to `0` if connection fails after 10s. Remains `1` upon success until BLE shuts down. |
+| | | **WiFi Scan Results** | `5131a3fc-7b0e-11ed-a1eb-0242ac120002` | `READ` | UTF-8 String (Descriptor `2904`) | List of scanned networks in the format `SSID´RSSI´´SSID´RSSI´´...` (max. ~460 bytes). |
+| **WiFi Configuration Service** | `0515c086-7b0c-11ed-a1eb-0242ac120002` | **WiFi SSID** | `090b0ef2-7b0d-11ed-a1eb-0242ac120002` | `READ`, `WRITE` | UTF-8 String (Descriptor `2904`) | Target WiFi SSID. Writing sets the SSID for connection and flash storage (max. 35 chars). |
+| | | **WiFi Password** | `a62eed84-7b0d-11ed-a1eb-0242ac120002` | `READ`, `WRITE` | UTF-8 String (Descriptor `2904`) | Target WiFi Password (max. 65 chars). Writing both SSID and password triggers immediate WiFi connection. |
+| **E-Paper & Firmware Update Service** | `10000000-0000-0000-0000-000000000001` | **Upload Data (OTA Chunks)** | `10000003-0000-0000-0000-000000000001` | `WRITE`, `WRITE_NR` | Binary (`[4-Byte CRC32 LE] + [Payload]`) | Firmware OTA data chunks. Each chunk begins with a 4-byte little-endian CRC32 of the payload, checked before copying into the 19.2 KB RAM buffer. |
+| | | **Upload Command / Status** | `10000004-0000-0000-0000-000000000001` | `READ`, `WRITE` | **READ**: `uint16` LE (Buffer Pos or `0xFFFF` on error)<br>**WRITE**: String Command | Controls OTA update lifecycle via commands: `START_FW`, `FLUSH`, `CLEAR`, `END_FW`. |
+
+---
+
+### Communication Workflows
+
+#### 1. WiFi Provisioning Workflow
+1. **Scan & Discover**: Scan for BLE devices with name prefix `epd7-` or `epd13-`.
+2. **Connect**: Establish GATT connection to the device.
+3. **(Optional) Read Nearby Networks**: Read characteristic `5131a3fc-7b0e-11ed-a1eb-0242ac120002` to retrieve the list of detected SSIDs and RSSI values (separated by `´´`).
+4. **Write Credentials**:
+   * Write target SSID as UTF-8 string to `090b0ef2-7b0d-11ed-a1eb-0242ac120002`.
+   * Write target Password as UTF-8 string to `a62eed84-7b0d-11ed-a1eb-0242ac120002`.
+5. **Verify Connection & Status Behavior**:
+   * Once both SSID and password are received, the firmware sets `4c578d4c-7b0e-11ed-a1eb-0242ac120002` to `1` and attempts to connect for up to 10 seconds (`WiFi.waitForConnectResult(10000)`).
+   * **If connection succeeds:** The characteristic **remains `1`**. Credentials are saved permanently to Flash (EEPROM addresses 0 & 40), and the ESP32 disables BLE (`BleInit(..., false)`).
+   * **If credentials are wrong / connection fails:** The firmware disconnects from WiFi, clears the temporary password buffer, and resets the status characteristic **back to `0`**. The device remains in BLE advertising mode to allow a retry.
+   * **Client Tip:** Clients should poll the status characteristic for 10–12 seconds. If it drops back to `0`, prompt the user to re-enter credentials. If it stays `1` (or the BLE connection closes upon successful handover), provisioning succeeded.
+
+*(A ready-to-use Python client implementing this validation logic is provided in [`testbench/ble_provisioner.py`](testbench/ble_provisioner.py).)*
+
+#### 2. BLE OTA Firmware Update Workflow
+1. **Start Update**: Write command string `"START_FW"` to `10000004-0000-0000-0000-000000000001`. This initializes the OTA partition update and allocates an internal 19,200-byte RAM buffer.
+2. **Stream Binary Chunks**: Send chunks to `10000003-0000-0000-0000-000000000001`. Each packet must be prefixed with a 4-byte CRC32 (little-endian) of the chunk payload. The firmware verifies the CRC before accepting the bytes into the buffer.
+3. **Flush Buffer**: Periodically send command string `"FLUSH"` to `10000004-...` before the 19.2 KB buffer fills up, writing buffered bytes to flash.
+4. **Finish Update**: Send command string `"END_FW"` to `10000004-...`. Remaining bytes are written, the firmware binary is validated, and the ESP32 automatically reboots into the new firmware. If validation fails, reading `10000004-...` returns `0xFFFF`.
 
 ## Memory Map (EEPROM/Flash)
 

@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""
+tools/generate_test_protocol.py
+Aggregiert HIL-Testergebnisse (JUnit XML) für EPD7 und EPD13, den Deployment-Status,
+die KI-Risikoanalyse sowie automatisierte KI-Fehlerursachenanalysen (RCA).
+Schreibt die Zusammenfassung in $GITHUB_STEP_SUMMARY, erzeugt ein Markdown-Artefakt
+für den Pull Request und ein JSON-Artefakt für automatische CI-Bots.
+"""
+
+import sys
+import os
+import re
+import json
+import argparse
+import xml.etree.ElementTree as ET
+from datetime import datetime
+
+# Windows CLI Encoding-Fix
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+# Stelle sicher, dass Repo-Root und tools-Verzeichnis im sys.path sind (für CI/CD Runner)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+for _p in (_REPO_ROOT, _SCRIPT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+try:
+    from tools.ai_failure_analysis import sanitize_log, analyze_failure
+except ImportError:
+    from ai_failure_analysis import sanitize_log, analyze_failure
+
+PHASE_TITLES = {
+    "test_00": "Phase 0: Initialer Factory-Reset (6x Power-Cycles & Deaktivierung)",
+    "test_01": "Phase 1: BLE-WLAN-Provisionierung",
+    "test_02": "Phase 2: Autonome REST-Aktivierung & Handshake",
+    "test_03": "Phase 3: Produktions-Firmware OTA (Manifest JSON)",
+    "test_04": "Phase 4: Kandidaten-Firmware OTA & S3-Bereinigung",
+    "test_05": "Phase 5: Kandidaten Factory-Reset & Deaktivierung",
+    "test_06": "Phase 6: Kandidaten BLE-WLAN-Provisionierung",
+    "test_07": "Phase 7: Kandidaten REST-Aktivierung & Handshake",
+    "test_08": "Phase 8: Presigned URL Bild-Upload, Rendering & Quittung",
+    "test_09": "Phase 9: REST-Deaktivierung & Deep Sleep"
+}
+
+def parse_junit_xml(xml_path):
+    """Parst eine JUnit-XML-Datei und extrahiert detaillierte Testergebnisse."""
+    if not xml_path or not os.path.isfile(xml_path):
+        return None
+
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+    except Exception as e:
+        print(f"⚠️ Warnung beim Parsen von '{xml_path}': {e}")
+        return None
+
+    testsuite = root if root.tag == "testsuite" else root.find("testsuite")
+    if testsuite is None:
+        return None
+
+    tests_total = int(testsuite.attrib.get("tests", 0))
+    failures_total = int(testsuite.attrib.get("failures", 0))
+    errors_total = int(testsuite.attrib.get("errors", 0))
+    skipped_total = int(testsuite.attrib.get("skipped", 0))
+    time_total = float(testsuite.attrib.get("time", 0.0))
+
+    cases = []
+    for tc in testsuite.findall("testcase"):
+        tc_name = tc.attrib.get("name", "")
+        tc_time = float(tc.attrib.get("time", 0.0))
+        classname = tc.attrib.get("classname", "")
+
+        status = "PASSED"
+        message = ""
+
+        fail = tc.find("failure")
+        err = tc.find("error")
+        skip = tc.find("skipped")
+
+        if fail is not None:
+            status = "FAILED"
+            message = fail.attrib.get("message", "") or fail.text or ""
+        elif err is not None:
+            status = "ERROR"
+            message = err.attrib.get("message", "") or err.text or ""
+        elif skip is not None:
+            status = "SKIPPED"
+            message = skip.attrib.get("message", "") or skip.text or "Übersprungen"
+
+        # Lesbaren Phasen-Titel ermitteln
+        phase_key = next((k for k in PHASE_TITLES if k in tc_name), tc_name)
+        phase_title = PHASE_TITLES.get(phase_key, tc_name)
+
+        cases.append({
+            "name": tc_name,
+            "phase": phase_title,
+            "classname": classname,
+            "duration": round(tc_time, 2),
+            "status": status,
+            "message": message.strip()
+        })
+
+    passed_total = tests_total - failures_total - errors_total - skipped_total
+
+    return {
+        "file": xml_path,
+        "total": tests_total,
+        "passed": max(0, passed_total),
+        "failed": failures_total + errors_total,
+        "skipped": skipped_total,
+        "duration": round(time_total, 2),
+        "cases": cases
+    }
+
+def load_risk_report(report_path):
+    """Liest die KI-Risikoanalyse ein und extrahiert Ampelbewertung, Empfehlung und Kurzzusammenfassung."""
+    if not report_path or not os.path.isfile(report_path):
+        return {
+            "available": False,
+            "rating": "UNBEKANNT",
+            "recommendation": "KEINE ANALYSE VORHANDEN",
+            "diff_summary": "",
+            "raw_text": "Keine KI-Risikoanalyse verfügbar."
+        }
+
+    try:
+        with open(report_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read().strip()
+
+        rating = "GERING (LOW)"
+        if "HOCH (HIGH)" in content:
+            rating = "HOCH (HIGH)"
+        elif "MITTEL (MEDIUM)" in content:
+            rating = "MITTEL (MEDIUM)"
+
+        recommendation = "GENEHMIGT"
+        if "BLOCKIERT" in content:
+            recommendation = "BLOCKIERT"
+        elif "MANUELLE PRÜFUNG" in content:
+            recommendation = "MANUELLE PRÜFUNG EMPFOHLEN"
+
+        # Kurzzusammenfassung der Code-Änderungen (Abschnitt 1) extrahieren
+        diff_summary = ""
+        m = re.search(r"### 1\.\s*🔍\s*Bewertung der aktuellen Code-Änderungen.*?\n(.*?)(?=\n---\n|\n### 2|\Z)", content, re.DOTALL)
+        if m:
+            diff_summary = m.group(1).strip()
+
+        return {
+            "available": True,
+            "rating": rating,
+            "recommendation": recommendation,
+            "diff_summary": diff_summary,
+            "raw_text": content
+        }
+    except Exception as e:
+        return {
+            "available": False,
+            "rating": "FEHLER",
+            "recommendation": f"Fehler beim Einlesen: {e}",
+            "diff_summary": "",
+            "raw_text": ""
+        }
+
+def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_data, risk_data):
+    """Erzeugt das vollständige Markdown-Testprotokoll."""
+    lines = []
+
+    # Gesamtbewertung ermitteln
+    any_test_failed = False
+    epd7_passed = epd7_data and epd7_data["failed"] == 0 and epd7_data["passed"] > 0
+    epd13_passed = epd13_data and epd13_data["failed"] == 0 and epd13_data["passed"] > 0
+    deploy_passed = deploy_status in ("success", "ok", "passed", "")
+
+    if (epd7_data and epd7_data["failed"] > 0) or (epd13_data and epd13_data["failed"] > 0) or not deploy_passed:
+        any_test_failed = True
+
+    risk_high = "HOCH" in risk_data.get("rating", "") or "BLOCKIERT" in risk_data.get("recommendation", "")
+
+    if any_test_failed or risk_high:
+        verdict = "🔴 NICHT BEREIT FÜR MERGE (FEHLER / BLOCKIERT)"
+        verdict_badge = "❌ **BLOCKIERT**"
+    elif risk_data.get("rating") == "MITTEL (MEDIUM)" or (epd13_data and epd13_data["skipped"] > 0):
+        verdict = "🟡 MANUELLE PRÜFUNG VOR MERGE EMPFOHLEN"
+        verdict_badge = "⚠️ **MANUELLE FREIGABE EMPFOHLEN**"
+    else:
+        verdict = "🟢 FREIGABE ERTEILT (BEREIT FÜR AUTOMATISCHEN PULL REQUEST)"
+        verdict_badge = "✅ **AUTOMATISCH GENEHMIGT**"
+
+    lines.append("# 🔬 HIL Testprotokoll & Release-Bewertung")
+    lines.append("")
+    lines.append(f"**Firmware-Version:** `{fw_version}` | **Commit:** `{commit_sha[:7] if commit_sha else 'HEAD'}` | **Zeitstempel:** `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
+    lines.append(f"### Gesamtstatus: {verdict_badge}")
+    lines.append(f"> **Fazit für Pull Request:** {verdict}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # 1. Übersichtstabelle
+    lines.append("## 📊 Übersicht der Test- und Deployment-Ergebnisse")
+    lines.append("")
+    lines.append("| Komponente / Target | Status | Details |")
+    lines.append("| :--- | :---: | :--- |")
+
+    # Deployment
+    if deploy_status == "skipped":
+        deploy_icon = "⚪ Übersprungen (Hardware-Tests nicht bestanden)"
+    elif deploy_passed:
+        deploy_icon = "✅ Erfolgreich"
+    else:
+        deploy_icon = "❌ Fehlgeschlagen"
+    lines.append(f"| **S3 Deployment (`dev`)** | {deploy_icon} | Upload von Firmware & JSON Manifests |")
+
+    # EPD7
+    if epd7_data:
+        epd7_icon = "✅ Bestanden" if epd7_data["failed"] == 0 else "❌ Fehlgeschlagen"
+        lines.append(f"| **EPD7 (7.5\" Hardware)** | {epd7_icon} | {epd7_data['passed']}/{epd7_data['total']} Tests bestanden ({epd7_data['duration']}s) |")
+    else:
+        lines.append("| **EPD7 (7.5\" Hardware)** | ⚪ Nicht ausgeführt | Kein Testergebnis vorhanden |")
+
+    # EPD13
+    if epd13_data:
+        if epd13_data["failed"] > 0:
+            epd13_icon = "❌ Fehlgeschlagen"
+            epd13_desc = f"{epd13_data['passed']}/{epd13_data['total']} Tests ({epd13_data['failed']} fehlgeschlagen)"
+        elif epd13_data["passed"] > 0:
+            epd13_icon = "✅ Bestanden"
+            epd13_desc = f"{epd13_data['passed']}/{epd13_data['total']} Tests bestanden ({epd13_data['duration']}s)"
+        else:
+            epd13_icon = "⚪ Übersprungen"
+            epd13_desc = "Hardware nicht angeschlossen (sauber übersprungen)"
+        lines.append(f"| **EPD13 (13.3\" Hardware)** | {epd13_icon} | {epd13_desc} |")
+    else:
+        lines.append("| **EPD13 (13.3\" Hardware)** | ⚪ Nicht ausgeführt | Kein Testergebnis vorhanden |")
+
+    # KI Risiko
+    risk_icon = "🟢 Gering"
+    if "HOCH" in risk_data.get("rating", ""):
+        risk_icon = "🔴 Hoch"
+    elif "MITTEL" in risk_data.get("rating", ""):
+        risk_icon = "🟡 Mittel"
+    lines.append(f"| **KI-Risikoanalyse (Pre-Flight)** | {risk_icon} | {risk_data.get('rating', 'Unbekannt')} – {risk_data.get('recommendation', '')} |")
+    lines.append("")
+
+    # 2. KI Fehlerdiagnose bei Fehlern (Root Cause Analysis)
+    failed_cases = []
+    for data, target_name in [(epd7_data, "EPD7"), (epd13_data, "EPD13")]:
+        if data and data.get("cases"):
+            for tc in data["cases"]:
+                if tc["status"] in ("FAILED", "ERROR"):
+                    failed_cases.append((target_name, tc))
+
+    if failed_cases:
+        lines.append("---")
+        lines.append("")
+        lines.append("## 🚨 Fehlgeschlagene Tests & 🤖 KI-Fehlerursachenanalyse")
+        lines.append("")
+        for target_name, tc in failed_cases:
+            diag = tc.get("ai_diagnosis")
+            if not diag:
+                print(f"🤖 Führe KI-Fehlerursachenanalyse durch für [{target_name}] {tc['name']}...")
+                diag = analyze_failure(tc["name"], tc["phase"], tc["message"])
+                tc["ai_diagnosis"] = diag
+
+            lines.append(f"### ❌ [{target_name}] {tc['phase']}")
+            lines.append(f"- **Testfall:** `{tc['name']}` | **Dauer:** {tc['duration']}s | **Status:** `{tc['status']}`")
+            lines.append("")
+
+            short_err = sanitize_log(tc["message"])
+            if len(short_err) > 600:
+                short_err = short_err[:600] + "\n[... gekürzt ...]"
+            lines.append(f"**Fehlerauszug (bereinigt):**\n```text\n{short_err}\n```")
+            lines.append("")
+            lines.append("<details open>")
+            lines.append("<summary>🤖 <b>KI-Fehlerdiagnose & Handlungsempfehlung (Gemini Flash RCA)</b></summary>")
+            lines.append("")
+            lines.append(diag)
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+
+    # 3. Detaillierte Hardware-Testergebnisse EPD7
+    if epd7_data and epd7_data.get("cases"):
+        lines.append("---")
+        lines.append("")
+        lines.append("## 📺 Detailergebnisse: EPD7 (7.5\" Display)")
+        lines.append("")
+        lines.append("| Testphase | Status | Dauer | Bemerkung |")
+        lines.append("| :--- | :---: | :---: | :--- |")
+        for tc in epd7_data["cases"]:
+            icon = "✅" if tc["status"] == "PASSED" else ("⚠️" if tc["status"] == "SKIPPED" else "❌")
+            note = tc["message"].replace("\n", " ")[:80] if tc["message"] else "Erfolgreich quittiert"
+            lines.append(f"| {tc['phase']} | {icon} `{tc['status']}` | {tc['duration']}s | {note} |")
+        lines.append("")
+
+    # 4. Detaillierte Hardware-Testergebnisse EPD13
+    if epd13_data and epd13_data.get("cases"):
+        lines.append("---")
+        lines.append("")
+        lines.append("## 📺 Detailergebnisse: EPD13 (13.3\" Display)")
+        lines.append("")
+        lines.append("| Testphase | Status | Dauer | Bemerkung |")
+        lines.append("| :--- | :---: | :---: | :--- |")
+        for tc in epd13_data["cases"]:
+            icon = "✅" if tc["status"] == "PASSED" else ("⚠️" if tc["status"] == "SKIPPED" else "❌")
+            note = tc["message"].replace("\n", " ")[:80] if tc["message"] else "Erfolgreich quittiert"
+            lines.append(f"| {tc['phase']} | {icon} `{tc['status']}` | {tc['duration']}s | {note} |")
+        lines.append("")
+
+    # 5. KI Risikoanalyse (Kompakte Zusammenfassung + Ausklappbarer Vollbericht)
+    if risk_data.get("available"):
+        lines.append("---")
+        lines.append("")
+        lines.append("## 🛡️ Pre-Flight KI-Risikoanalyse (Zusammenfassung)")
+        lines.append("")
+        lines.append(f"- **Gesamtbewertung:** {risk_data.get('rating', 'Unbekannt')}")
+        lines.append(f"- **Release-Empfehlung:** {risk_data.get('recommendation', 'Unbekannt')}")
+        if risk_data.get("diff_summary"):
+            lines.append("")
+            lines.append("**Kernaussage zu den Code-Änderungen:**")
+            lines.append(risk_data["diff_summary"])
+            lines.append("")
+
+        if risk_data.get("raw_text"):
+            lines.append("<details>")
+            lines.append("<summary>🔍 <b>Vollständigen Pre-Flight Audit-Bericht anzeigen</b></summary>")
+            lines.append("")
+            lines.append(risk_data["raw_text"])
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+
+    return "\n".join(lines)
+
+def main():
+    parser = argparse.ArgumentParser(description="Aggregiert HIL-Testergebnisse & generiert Protokoll für Pull Requests")
+    parser.add_argument("--junit-epd7", help="Pfad zur JUnit XML für EPD7")
+    parser.add_argument("--junit-epd13", help="Pfad zur JUnit XML für EPD13")
+    parser.add_argument("--risk-report", help="Pfad zum KI-Risikobericht (risk_report.md)")
+    parser.add_argument("--fw-version", default=os.environ.get("FW_VERSION", "0.0.0"), help="Firmware-Version")
+    parser.add_argument("--commit-sha", default=os.environ.get("GITHUB_SHA", "HEAD"), help="Git Commit SHA")
+    parser.add_argument("--deploy-status", default=os.environ.get("DEPLOY_STATUS", "success"), help="Status des S3 Deployments")
+    parser.add_argument("--output-md", help="Ausgabepfad für Markdown-Protokoll (z.B. hil_test_protocol.md)")
+    parser.add_argument("--output-json", help="Ausgabepfad für JSON-Protokoll (z.B. hil_test_protocol.json)")
+    parser.add_argument("--strict", action="store_true", help="Beende mit Exit-Code 1 wenn ein Test fehlgeschlagen ist")
+    args = parser.parse_args()
+
+    epd7_data = parse_junit_xml(args.junit_epd7)
+    epd13_data = parse_junit_xml(args.junit_epd13)
+    risk_data = load_risk_report(args.risk_report)
+
+    md_report = generate_markdown(
+        fw_version=args.fw_version,
+        commit_sha=args.commit_sha,
+        deploy_status=args.deploy_status,
+        epd7_data=epd7_data,
+        epd13_data=epd13_data,
+        risk_data=risk_data
+    )
+
+    print("\n" + "=" * 65)
+    print("📋 HIL TESTPROTOKOLL GENERIERT")
+    print("=" * 65)
+    print(md_report)
+    print("=" * 65 + "\n")
+
+    # In Step Summary schreiben
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        try:
+            with open(step_summary, "a", encoding="utf-8") as sf:
+                sf.write("\n\n" + md_report + "\n")
+            print(f"✅ In GITHUB_STEP_SUMMARY geschrieben: {step_summary}")
+        except Exception as e:
+            print(f"⚠️ Warnung beim Schreiben von GITHUB_STEP_SUMMARY: {e}")
+
+    # Als Markdown-Datei speichern
+    if args.output_md:
+        try:
+            with open(args.output_md, "w", encoding="utf-8") as mf:
+                mf.write(md_report)
+            print(f"📄 Markdown-Protokoll gespeichert: {args.output_md}")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Speichern von {args.output_md}: {e}")
+
+    # Als strukturierte JSON-Datei speichern (für automatische PR-Bots)
+    if args.output_json:
+        try:
+            # Sammle etwaige Fehlerdiagnosen für JSON
+            diagnostics = []
+            for data, target_name in [(epd7_data, "EPD7"), (epd13_data, "EPD13")]:
+                if data and data.get("cases"):
+                    for tc in data["cases"]:
+                        if tc.get("ai_diagnosis"):
+                            diagnostics.append({
+                                "target": target_name,
+                                "test": tc["name"],
+                                "phase": tc["phase"],
+                                "diagnosis": tc["ai_diagnosis"]
+                            })
+
+            json_payload = {
+                "version": args.fw_version,
+                "commit": args.commit_sha,
+                "timestamp": datetime.now().isoformat(),
+                "deploy_status": args.deploy_status,
+                "risk_analysis": {
+                    "rating": risk_data.get("rating"),
+                    "recommendation": risk_data.get("recommendation"),
+                },
+                "epd7": epd7_data,
+                "epd13": epd13_data,
+                "ai_failure_diagnostics": diagnostics,
+                "overall_success": not (
+                    (epd7_data and epd7_data["failed"] > 0) or
+                    (epd13_data and epd13_data["failed"] > 0) or
+                    args.deploy_status not in ("success", "ok", "passed", "") or
+                    "HOCH" in risk_data.get("rating", "") or
+                    "BLOCKIERT" in risk_data.get("recommendation", "")
+                )
+            }
+            with open(args.output_json, "w", encoding="utf-8") as jf:
+                json.dump(json_payload, jf, indent=2)
+            print(f"📦 JSON-Protokoll gespeichert: {args.output_json}")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Speichern von {args.output_json}: {e}")
+
+    # Bei Fehlern strikt abbrechen
+    if args.strict:
+        has_failure = (
+            (epd7_data and epd7_data["failed"] > 0) or
+            (epd13_data and epd13_data["failed"] > 0) or
+            args.deploy_status not in ("success", "ok", "passed", "") or
+            "HOCH" in risk_data.get("rating", "") or
+            "BLOCKIERT" in risk_data.get("recommendation", "")
+        )
+        if has_failure:
+            print("❌ STRIKTER PIPELINE-ABBRUCH: Fehler im Deployment, in den Hardware-Tests oder KI-Risikobewertung!")
+            sys.exit(1)
+
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()

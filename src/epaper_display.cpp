@@ -630,7 +630,7 @@ void displayOverlays(DisplayType& dispObj, DisplayInfo displayData, bool invertC
 
       sprintf(charBuffer, "ID: %s", epd_client_id);
       String wifiSSID = WiFi.SSID();
-      if (wifiSSID.length() > 1) {
+      if (wifiSSID.length() > 0) {
          sprintf(charBuffer2, "%s WiFi: %s", charBuffer, wifiSSID.c_str());
          sprintf(charBuffer, "%s", charBuffer2);
 

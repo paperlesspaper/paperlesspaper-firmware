@@ -39,6 +39,29 @@ except ImportError:
 CONFIRMATION_PHRASE = "I_CONFIRM_CANARY_OTA"
 
 
+def _load_env():
+    possible_paths = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
+        os.path.expanduser("~/.paperlesspaper.env"),
+        os.path.expanduser("~/.env")
+    ]
+    for env_path in possible_paths:
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k, v = k.strip(), v.strip().strip('"\'')
+                            if k not in os.environ:
+                                os.environ[k] = v
+            except Exception:
+                pass
+
+_load_env()
+
+
 def get_dynamodb_resource(region=None):
     if boto3 is None:
         raise RuntimeError("Das Modul 'boto3' ist nicht installiert. Bitte 'pip install boto3' ausführen.")
@@ -475,14 +498,26 @@ def apply_ota_to_selected_devices(target_devices, ota_url, dry_run=True, confirm
                 print(f"   ❌ Fehler beim Aktualisieren von Shadow für '{thing_name}': {e}")
 
 
-def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="", region=None):
+def resolve_main_ota_url(s3_bucket=None):
     """
-    Entfernt die individuelle 'otaUrl' aus dem Named Shadow 'settings' (setzt auf null),
-    sodass die Geräte wieder der globalen Produktions-Firmware folgen.
+    Ermittelt die FOTA Manifest URL der aktuellen regulären Hauptfirmware (main/production):
+    - http://{bucket}/espfota_{target}.json
     """
+    bucket = s3_bucket or os.environ.get("S3_BUCKET_NAME") or os.environ.get("HIL_S3_BUCKET") or "ul.epaperframe.de"
+    return f"http://{bucket}/espfota_{{target}}.json"
+
+
+def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="", region=None, s3_bucket=None, ota_url=None):
+    """
+    Rollt die aktuelle reguläre Hauptfirmware (main/production) auf die Zielgeräte aus:
+    - Setzt Named Shadow 'settings.otaUrl' auf die Produktions-Manifest-URL (espfota_{target}.json)
+    - Triggert das Gerät via MQTT ($aws/things/{thing}/epaper/receive)
+    """
+    main_url = ota_url or resolve_main_ota_url(s3_bucket=s3_bucket)
     print("=" * 65)
-    print("🔄 CANARY SHADOW RESET ENGINE")
+    print("🔄 CANARY SHADOW RESET ENGINE (MAIN FIRMWARE ROLLBACK)")
     print("=" * 65)
+    print(f"  Hauptversion FOTA URL:           {main_url}")
     print(f"  Anzahl zurückzusetzender Geräte: {len(target_devices)}")
     print(f"  Dry-Run Modus:                   {dry_run}")
     print("=" * 65)
@@ -501,28 +536,47 @@ def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="
 
     for idx, dev_id in enumerate(target_devices, 1):
         thing_name = dev_id.strip()
+        model = "epd13" if "13" in thing_name.lower() else "epd7"
+        dev_main_url = main_url
+        if "{target}" in dev_main_url:
+            dev_main_url = dev_main_url.replace("{target}", model)
+        elif "epd7" in dev_main_url and "13" in thing_name.lower():
+            dev_main_url = dev_main_url.replace("epd7", "epd13")
+        elif "epd13" in dev_main_url and ("epd7" in thing_name.lower() or "13" not in thing_name.lower()):
+            dev_main_url = dev_main_url.replace("epd13", "epd7")
+
         shadow_payload = {
             "state": {
                 "reported": {
-                    "otaUrl": None
+                    "otaUrl": dev_main_url
                 }
             }
         }
         payload_bytes = json.dumps(shadow_payload).encode("utf-8")
 
         if dry_run:
-            print(f" [DRY-RUN] #{idx}: Würde Shadow 'settings.otaUrl' für '{thing_name}' zurücksetzen (otaUrl=null)")
+            print(f" [DRY-RUN] #{idx}: Würde Shadow 'settings.otaUrl' für '{thing_name}' auf Hauptversion setzen:")
+            print(f"            Payload: {shadow_payload}")
         else:
             try:
-                print(f" [RESET] #{idx}: Setze Shadow für '{thing_name}' zurück...")
+                print(f" [RESET] #{idx}: Setze Shadow 'settings.otaUrl' für '{thing_name}' auf Hauptversion ({dev_main_url})...")
                 iot_client.update_thing_shadow(
                     thingName=thing_name,
                     shadowName="settings",
                     payload=payload_bytes
                 )
-                print("   ✅ Shadow erfolgreich zurückgesetzt.")
+                print("   ✅ Shadow erfolgreich auf Hauptversion gesetzt.")
             except ClientError as e:
-                print(f"   ❌ Fehler beim Zurücksetzen von Shadow für '{thing_name}': {e}")
+                print(f"   ❌ Fehler beim Setzen von Shadow für '{thing_name}': {e}")
+
+            # Optional MQTT-Push zur sofortigen Signalisierung
+            try:
+                mqtt_topic = f"$aws/things/{thing_name}/epaper/receive"
+                mqtt_msg = json.dumps({"ota": dev_main_url})
+                iot_client.publish(topic=mqtt_topic, qos=1, payload=mqtt_msg.encode("utf-8"))
+                print(f"   📡 MQTT Trigger an '{mqtt_topic}' gesendet.")
+            except Exception:
+                pass
 
 
 def resolve_ota_url(ota_url=None, s3_bucket=None, branch=None):
@@ -554,7 +608,7 @@ def main():
     parser.add_argument("--ota-url", help="FOTA Manifest URL für das Pre-Release (Standard: automatisch nach Branch)")
     parser.add_argument("--deploy", action="store_true", help="Rollt die Canary OTA URL auf die Zielgeräte aus")
     parser.add_argument("--apply", action="store_true", help="Aktiviert das tatsächliche Setzen/Zurücksetzen der Shadows (erfordert --confirm-ota)")
-    parser.add_argument("--reset", action="store_true", help="Setzt den otaUrl-Shadow der Zielgeräte zurück (auf null)")
+    parser.add_argument("--reset", action="store_true", help="Setzt Zielgeräte auf die reguläre Hauptfirmware (main/production) zurück")
     parser.add_argument("--recommend", action="store_true", help="Führt den Flottenscan zur Ermittlung von Pilotgeräten aus")
     parser.add_argument("--confirm-ota", default="", help=f"Sicherheits-Bestätigungstoken: '{CONFIRMATION_PHRASE}'")
     parser.add_argument("--mock-file", help="Pfad zu einer JSON-Datei mit Test-Geräten (für Offline-/Testbench-Betrieb ohne AWS)")
@@ -594,7 +648,9 @@ def main():
             selected_targets,
             dry_run=is_dry_run,
             confirm_token=args.confirm_ota,
-            region=args.region
+            region=args.region,
+            s3_bucket=os.environ.get("S3_BUCKET_NAME") or os.environ.get("HIL_S3_BUCKET"),
+            ota_url=args.ota_url
         )
         return
 
