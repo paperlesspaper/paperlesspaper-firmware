@@ -2016,6 +2016,7 @@ void printDebugInfo() {
 // sleep x seconds
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
+   chargeMode(false);
    initEpaperDisplay(SPI);
    checkOrientationInBackground(0, false);
    startupCounter(true);
@@ -2052,7 +2053,6 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    pinMode(I2C_SDA_PIN, INPUT);
    pinMode(I2C_SCL_PIN, INPUT);
    pinMode(BAT_VOLT_EN_PIN, INPUT);
-   pinMode(CHG_EN_PIN, INPUT);
    pinMode(CS_SD_PIN, OUTPUT);
    digitalWrite(CS_SD_PIN, HIGH);
 
@@ -2636,27 +2636,22 @@ bool chargeMode(bool enable) {
    delay(1);
    if (enable) {
       pinMode(CHG_EN_PIN, INPUT);
-      delay(2);
+      gpio_hold_dis((gpio_num_t)CHG_EN_PIN);
+      delay(5);
       chargeState = digitalRead(CHG_STAT_PIN);
       if (chargeState == LOW) {
-         Serial.println("[CHARGE] on - Charging");
+         Serial.println("[CHARGE] on - Charger ON");
          isCharging = true;
       } else {
-         Serial.println("[CHARGE] on - Charge Done");
-         digitalWrite(CHG_EN_PIN, LOW);
+         Serial.println("[CHARGE] on - Charger DONE");
+         isCharging = false;
       }
    } else {
+      digitalWrite(CHG_EN_PIN, LOW);
       pinMode(CHG_EN_PIN, OUTPUT);
-      digitalWrite(CHG_EN_PIN, HIGH);
-      delay(2);
-      chargeState = digitalRead(CHG_STAT_PIN);
-      if (chargeState == LOW) {
-         Serial.println("[CHARGE] off - Charging");
-         isCharging = true;
-      } else {
-         Serial.println("[CHARGE] off - Charge Done");
-         digitalWrite(CHG_EN_PIN, LOW);
-      }
+      gpio_hold_dis((gpio_num_t)CHG_EN_PIN);  // alten Hold ggf. erneuern
+      gpio_hold_en((gpio_num_t)CHG_EN_PIN);   // im LP_AON sperren
+      Serial.println("[CHARGE] off - Charge OFF");
    }
    return isCharging;
 }
@@ -2726,7 +2721,26 @@ void test() {
    ledBlink(0, false);
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
+
+   delay(5000);
    analogWrite(LED_PIN, 100);
+   chargeMode(true);
+
+   delay(5000);
+   analogWrite(LED_PIN, 0);
+   chargeMode(false);
+
+   delay(5000);
+   analogWrite(LED_PIN, 100);
+   chargeMode(true);
+
+   delay(5000);
+   analogWrite(LED_PIN, 10);
+   chargeMode(true);
+
+   delay(5000);
+   gotToDeepSleep(3600, false, false);
+
    if (powerSupplyDisplay(true)) delay(100);
 
    File root = SPIFFS.open("/");
@@ -2779,7 +2793,6 @@ void test() {
    while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
-      // bool testCharge = chargeMode(false);
       systemData.vddValue = readVDD(false);
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
@@ -2788,7 +2801,6 @@ void test() {
    while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
-      // bool testCharge = chargeMode(false);
       systemData.vddValue = readVDD(false);
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
@@ -2904,7 +2916,6 @@ void setup() {
    powerSupplyDisplay(true);
    initEpaperDisplay(SPI);
    powerSupplyDisplay(false);
-   chargeMode(false);
 
    setDeviceUid();
    setDisplayData(CLIENT_ID, systemData.vddValue);
