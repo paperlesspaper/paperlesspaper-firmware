@@ -167,7 +167,7 @@ def load_risk_report(report_path):
             "raw_text": ""
         }
 
-def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_data, risk_data):
+def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_data, risk_data, deploy_name="dev"):
     """Erzeugt das vollständige Markdown-Testprotokoll."""
     lines = []
 
@@ -214,7 +214,7 @@ def generate_markdown(fw_version, commit_sha, deploy_status, epd7_data, epd13_da
         deploy_icon = "✅ Erfolgreich"
     else:
         deploy_icon = "❌ Fehlgeschlagen"
-    lines.append(f"| **S3 Deployment (`dev`)** | {deploy_icon} | Upload von Firmware & JSON Manifests |")
+    lines.append(f"| **S3 Deployment (`{deploy_name}`)** | {deploy_icon} | Upload von Firmware & JSON Manifests |")
 
     # EPD7
     if epd7_data:
@@ -345,6 +345,7 @@ def main():
     parser.add_argument("--fw-version", default=os.environ.get("FW_VERSION", "0.0.0"), help="Firmware-Version")
     parser.add_argument("--commit-sha", default=os.environ.get("GITHUB_SHA", "HEAD"), help="Git Commit SHA")
     parser.add_argument("--deploy-status", default=os.environ.get("DEPLOY_STATUS", "success"), help="Status des S3 Deployments")
+    parser.add_argument("--deploy-name", default="dev", help="Name des Deployments (z. B. 'dev' oder 'prod')")
     parser.add_argument("--output-md", help="Ausgabepfad für Markdown-Protokoll (z.B. hil_test_protocol.md)")
     parser.add_argument("--output-json", help="Ausgabepfad für JSON-Protokoll (z.B. hil_test_protocol.json)")
     parser.add_argument("--strict", action="store_true", help="Beende mit Exit-Code 1 wenn ein Test fehlgeschlagen ist")
@@ -360,7 +361,8 @@ def main():
         deploy_status=args.deploy_status,
         epd7_data=epd7_data,
         epd13_data=epd13_data,
-        risk_data=risk_data
+        risk_data=risk_data,
+        deploy_name=args.deploy_name
     )
 
     print("\n" + "=" * 65)
@@ -409,6 +411,7 @@ def main():
                 "commit": args.commit_sha,
                 "timestamp": datetime.now().isoformat(),
                 "deploy_status": args.deploy_status,
+                "deploy_name": args.deploy_name,
                 "risk_analysis": {
                     "rating": risk_data.get("rating"),
                     "recommendation": risk_data.get("recommendation"),

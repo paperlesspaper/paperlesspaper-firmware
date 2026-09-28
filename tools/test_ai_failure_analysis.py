@@ -141,6 +141,13 @@ class TestAIFailureAnalysis(unittest.TestCase):
         self.assertIn("Pre-Flight KI-Risikoanalyse (Zusammenfassung)", md)
         self.assertIn("Vollständigen Pre-Flight Audit-Bericht anzeigen", md)
 
+    def test_generate_markdown_deploy_name(self):
+        from tools.generate_test_protocol import generate_markdown
+        md_dev = generate_markdown("3.0.1", "123456", "success", None, None, {}, deploy_name="dev")
+        self.assertIn("S3 Deployment (`dev`)", md_dev)
+        md_prod = generate_markdown("3.0.1", "123456", "success", None, None, {}, deploy_name="prod")
+        self.assertIn("S3 Deployment (`prod`)", md_prod)
+
     def test_privacy_module_sanitization(self):
         from testbench.privacy import mask_path, sanitize_log_line, mask_uid, mask_mac
         win_path = "C:\\Users\\danie\\actions-runner\\_work\\firmware\\test.py"
