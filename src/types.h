@@ -2,11 +2,17 @@
 #include <Arduino.h>
 
 // ==========================================
-// DISPLAY SELECTION
+// DISPLAY SELECTION & COMPILE-TIME MUTEX
 // ==========================================
+#if defined(EPD_TYPE_7INCH) && defined(EPD_TYPE_13INCH)
+#error "Config Error: Both EPD_TYPE_7INCH and EPD_TYPE_13INCH are defined! Only one display type is allowed."
+#endif
+
+#if !defined(EPD_TYPE_7INCH) && !defined(EPD_TYPE_13INCH)
+// Default fallback for legacy/local builds without build flags
 #define EPD_TYPE_13INCH
-// #define EPD_TYPE_7INCH
-//      ==========================================
+#endif
+// ==========================================
 
 #define SOFTWARE_VERSION "0.0.0"
 #define DEBUG 1

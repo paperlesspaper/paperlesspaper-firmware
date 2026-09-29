@@ -19,8 +19,10 @@
 #include <esp_pm.h>
 #include <esp_sleep.h>
 #include <esp_wifi.h>
+#include <nvs_flash.h>
 #include <rom/crc.h>
 #include <rom/rtc.h>
+#include <soc/lp_aon_reg.h>
 #include <vector>
 
 #include "EEPROM.h"
@@ -254,6 +256,7 @@ bool sdInit(bool forceFormat = false);
 void sdTest(bool doLog = false);
 bool downloadBMPToFlash(const char* url, const char* filename, bool forceDownload = false);
 wakeup_reason_t getWakeupReason();
+void rebootIntoRomBootloader();
 
 void WiFiEvent(WiFiEvent_t event) {
    if (DEBUG_FLAG)
@@ -386,6 +389,18 @@ void iotReceiveHandler(String& topic, String& payload) {
       if (strcmp(activated, "reset") == 0) {
          Serial.println("[AWS RX] Device activation reset");
          deviceActivationReset = true;
+      }
+   }
+
+   if (doc["cmd"].is<JsonString>()) {
+      const char* command = doc["cmd"];
+      if (strcmp(command, "wipe") == 0) {
+         Serial.println("[AWS RX] Command 'wipe' received via MQTT. Triggering Factory Reset...");
+         debugCheck();
+         return;
+      } else if (strcmp(command, "bootloader") == 0) {
+         Serial.println("[AWS RX] Command 'bootloader' received via MQTT. Rebooting into ROM Bootloader...");
+         rebootIntoRomBootloader();
       }
    }
 }
@@ -630,7 +645,7 @@ bool wifiSmart() {
       if (doReset && i >= 1) {
          break;  // leave wifi search quick on reset
       }
-      if (wifiSettings.ssid.length() < 2) {
+      if (wifiSettings.ssid.length() < 1) {
          Serial.println("[NETWORK] Stop connect because no wifi set");
          break;
       }
@@ -678,7 +693,7 @@ bool wifiSmart() {
             Serial.printf("\n[NETWORK] BLE reprovisioning is over, sleep: %d s\n", settings.timeout);
             break;
          }
-         if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
+         if (wifiSettings.bleSSID.length() > 0 && wifiSettings.blePASS.length() > 1) {
             Serial.println("[NETWORK] reprovisioning got all BLE, try");
             writeIntToFlash(0, 140);  // reset reconnect counter
             isReconnect = true;
@@ -722,7 +737,7 @@ bool wifiSmart() {
             break;
          }
          // try to connect wifi if ble data is set
-         if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
+         if (wifiSettings.bleSSID.length() > 0 && wifiSettings.blePASS.length() > 1) {
             Serial.println("[NETWORK] got all BLE, try to connect with data");
             wifiSettings.wifiIsConnected = true;
             wifiConnectedCharacteristic->setValue(wifiSettings.wifiIsConnected);
@@ -756,7 +771,7 @@ bool wifiSmart() {
          delay(500);
          if (wifiRetryCount > 20) {
             wifiRetryCount = 0;
-            if (wifiSettings.bleSSID.length() > 1 && wifiSettings.blePASS.length() > 1) {
+            if (wifiSettings.bleSSID.length() > 0 && wifiSettings.blePASS.length() > 1) {
                WiFi.begin(wifiSettings.bleSSID.c_str(), wifiSettings.blePASS.c_str());
             } else {
                WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
@@ -2001,6 +2016,7 @@ void printDebugInfo() {
 // sleep x seconds
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
+   chargeMode(false);
    initEpaperDisplay(SPI);
    checkOrientationInBackground(0, false);
    startupCounter(true);
@@ -2037,7 +2053,6 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    pinMode(I2C_SDA_PIN, INPUT);
    pinMode(I2C_SCL_PIN, INPUT);
    pinMode(BAT_VOLT_EN_PIN, INPUT);
-   pinMode(CHG_EN_PIN, INPUT);
    pinMode(CS_SD_PIN, OUTPUT);
    digitalWrite(CS_SD_PIN, HIGH);
 
@@ -2239,6 +2254,19 @@ bool resetAll(bool resetActivation, bool resetWifi) {
 
 void debugCheck() {
    Serial.println("[DEBUG] Deploy State");
+
+#ifdef EPD_TYPE_13INCH
+   sdInit(true);  // forceFormat formats the SD card via FatFormatter
+#endif
+   SerialFlash.eraseAll();
+   while (!SerialFlash.ready()) {
+      vTaskDelay(10);
+   }
+
+   nvs_flash_erase();
+   nvs_flash_init();
+   EepromInit(EEPROM_SIZE);
+
    resetAll(false, true);
    setDisplayData(CLIENT_ID, systemData.vddValue);
    printDebugInfo();
@@ -2263,17 +2291,37 @@ void debugCheck() {
    return;
 }
 
-// test if a byte is set via serial to enter deploy mode
+void rebootIntoRomBootloader() {
+   Serial.println("[SYSTEM] Rebooting into ROM Download Bootloader...");
+   Serial.flush();
+   delay(100);
+#ifdef LP_AON_SYS_CFG_REG
+   REG_WRITE(LP_AON_SYS_CFG_REG, REG_READ(LP_AON_SYS_CFG_REG) | LP_AON_FORCE_DOWNLOAD_BOOT);
+#endif
+   esp_restart();
+}
+
+// test if a byte/command is set via serial to enter deploy mode or bootloader
 void testModeCheck() {
-   if (getActivatedFromMem()) return;  // skip test scan in real activated device
    delay(15);
    Serial.printf("%s", "[MAIN] test mode check...\n");  // important, this triggers test start
-   delay(40);
-   int incomingByte = Serial.read();  // read the incoming byte:
-   if (incomingByte == 84) {
-      isTestMode = true;
-      Serial.printf("%s", "[MAIN] test mode set!\n");
-      EepromClear();
+   delay(60);
+
+   if (Serial.available()) {
+      int incomingByte = Serial.read();
+      // 'B' (66) or 'b' (98): Trigger ROM download bootloader immediately
+      if (incomingByte == 66 || incomingByte == 98) {
+         Serial.println("[MAIN] Bootloader command 'B' received via Serial!");
+         rebootIntoRomBootloader();
+         return;
+      }
+      // 'T' (84): Standard deploy / test mode check
+      if (incomingByte == 84) {
+         isTestMode = true;
+         Serial.printf("%s", "[MAIN] test mode set!\n");
+         EepromClear();
+         return;
+      }
    } else {
       Serial.printf("%s", "[MAIN] test mode skipped.\n");
    }
@@ -2588,27 +2636,22 @@ bool chargeMode(bool enable) {
    delay(1);
    if (enable) {
       pinMode(CHG_EN_PIN, INPUT);
-      delay(2);
+      gpio_hold_dis((gpio_num_t)CHG_EN_PIN);
+      delay(5);
       chargeState = digitalRead(CHG_STAT_PIN);
       if (chargeState == LOW) {
-         Serial.println("[CHARGE] on - Charging");
+         Serial.println("[CHARGE] on - Charger ON");
          isCharging = true;
       } else {
-         Serial.println("[CHARGE] on - Charge Done");
-         digitalWrite(CHG_EN_PIN, LOW);
+         Serial.println("[CHARGE] on - Charger DONE");
+         isCharging = false;
       }
    } else {
+      digitalWrite(CHG_EN_PIN, LOW);
       pinMode(CHG_EN_PIN, OUTPUT);
-      digitalWrite(CHG_EN_PIN, HIGH);
-      delay(2);
-      chargeState = digitalRead(CHG_STAT_PIN);
-      if (chargeState == LOW) {
-         Serial.println("[CHARGE] off - Charging");
-         isCharging = true;
-      } else {
-         Serial.println("[CHARGE] off - Charge Done");
-         digitalWrite(CHG_EN_PIN, LOW);
-      }
+      gpio_hold_dis((gpio_num_t)CHG_EN_PIN);  // alten Hold ggf. erneuern
+      gpio_hold_en((gpio_num_t)CHG_EN_PIN);   // im LP_AON sperren
+      Serial.println("[CHARGE] off - Charge OFF");
    }
    return isCharging;
 }
@@ -2678,7 +2721,26 @@ void test() {
    ledBlink(0, false);
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
+
+   delay(5000);
    analogWrite(LED_PIN, 100);
+   chargeMode(true);
+
+   delay(5000);
+   analogWrite(LED_PIN, 0);
+   chargeMode(false);
+
+   delay(5000);
+   analogWrite(LED_PIN, 100);
+   chargeMode(true);
+
+   delay(5000);
+   analogWrite(LED_PIN, 10);
+   chargeMode(true);
+
+   delay(5000);
+   gotToDeepSleep(3600, false, false);
+
    if (powerSupplyDisplay(true)) delay(100);
 
    File root = SPIFFS.open("/");
@@ -2731,7 +2793,6 @@ void test() {
    while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
-      // bool testCharge = chargeMode(false);
       systemData.vddValue = readVDD(false);
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
@@ -2740,7 +2801,6 @@ void test() {
    while (true) {
       float temperature = temperatureRead();
       Serial.printf("Temp onBoard = %.2f °C\n", temperature);
-      // bool testCharge = chargeMode(false);
       systemData.vddValue = readVDD(false);
       Serial.printf("VDD: %d mV\n", systemData.vddValue);
       delay(5000);
@@ -2856,7 +2916,6 @@ void setup() {
    powerSupplyDisplay(true);
    initEpaperDisplay(SPI);
    powerSupplyDisplay(false);
-   chargeMode(false);
 
    setDeviceUid();
    setDisplayData(CLIENT_ID, systemData.vddValue);

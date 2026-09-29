@@ -21,3 +21,4 @@ __pycache__/
 *.pyc
 testbench/hardware_mapping.json
 pilot_recommendations*
+risk_report.md
