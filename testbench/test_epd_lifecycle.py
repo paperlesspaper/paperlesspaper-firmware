@@ -264,6 +264,10 @@ class TestEPD7Lifecycle:
             )
             assert success is True, f"WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
             print(f"🎉 BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
+            try:
+                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=12)
+            except TimeoutError:
+                pass
         except Exception as exc:
             print(f"\n🛑 [{device.name}] BLE-WLAN-Provisionierung fehlgeschlagen: {exc}")
             print("   ➔ Ohne WLAN-Verbindung können nachfolgende Tests (OTA, AWS, REST) nicht funktionieren.")
@@ -282,12 +286,14 @@ class TestEPD7Lifecycle:
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [{device.name}] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
         try:
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
-            print(f"ℹ️ [{device.name}] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep). Wecke per Relais auf...")
+            print(f"ℹ️ [{device.name}] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
+            aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
 
         assert activated_match is not None, "Display hat 'Device is activated' nicht empfangen!"
 
@@ -414,6 +420,10 @@ class TestEPD7Lifecycle:
             )
             assert success is True, f"Kandidaten-Firmware: WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
             print(f"🎉 Kandidaten-Firmware: BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
+            try:
+                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=12)
+            except TimeoutError:
+                pass
         except Exception as exc:
             print(f"\n🛑 [EPD7] BLE-WLAN-Provisionierung der Kandidaten-Firmware fehlgeschlagen: {exc}")
             request.session.shouldstop = f"EPD7 Kandidaten BLE-WLAN-Provisionierung fehlgeschlagen: {exc}"
@@ -430,12 +440,14 @@ class TestEPD7Lifecycle:
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [EPD7] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
         try:
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
-            print(f"ℹ️ [EPD7] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep). Wecke per Relais auf...")
+            print(f"ℹ️ [EPD7] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
+            aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
 
         assert activated_match is not None, "Display hat 'Device is activated' auf Kandidaten-Firmware nicht empfangen!"
 
@@ -628,6 +640,10 @@ class TestEPD13Lifecycle:
             )
             assert success is True, f"WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
             print(f"🎉 BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
+            try:
+                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=12)
+            except TimeoutError:
+                pass
         except Exception as exc:
             print(f"\n🛑 [EPD13] BLE-WLAN-Provisionierung fehlgeschlagen: {exc}")
             print("   ➔ Ohne WLAN-Verbindung können nachfolgende Tests (OTA, AWS, REST) nicht funktionieren.")
@@ -646,12 +662,14 @@ class TestEPD13Lifecycle:
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [EPD13] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
         try:
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
-            print(f"ℹ️ [EPD13] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep). Wecke per Relais auf...")
+            print(f"ℹ️ [EPD13] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
+            aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
 
         assert activated_match is not None, "Display hat 'Device is activated' nicht empfangen!"
 
@@ -778,6 +796,10 @@ class TestEPD13Lifecycle:
             )
             assert success is True, f"Kandidaten-Firmware: WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
             print(f"🎉 Kandidaten-Firmware: BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
+            try:
+                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=12)
+            except TimeoutError:
+                pass
         except Exception as exc:
             print(f"\n🛑 [EPD13] BLE-WLAN-Provisionierung der Kandidaten-Firmware fehlgeschlagen: {exc}")
             request.session.shouldstop = f"EPD13 Kandidaten BLE-WLAN-Provisionierung fehlgeschlagen: {exc}"
@@ -794,12 +816,14 @@ class TestEPD13Lifecycle:
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [EPD13] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
         try:
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
-            print(f"ℹ️ [EPD13] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep). Wecke per Relais auf...")
+            print(f"ℹ️ [EPD13] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
+            aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
 
         assert activated_match is not None, "Display hat 'Device is activated' auf Kandidaten-Firmware nicht empfangen!"
 
