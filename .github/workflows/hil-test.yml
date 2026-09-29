@@ -49,6 +49,7 @@ jobs:
           AUTH_0_CLIENT_SECRET: ${{ secrets.AUTH_0_CLIENT_SECRET }}
           AUTH_0_AUDIENCE: ${{ secrets.AUTH_0_AUDIENCE }}
           AUTH_0_GRANT_TYPE: ${{ secrets.AUTH_0_GRANT_TYPE }}
+          HIL_RENDER_TIMEOUT: 240
         run: |
           python -m testbench.run_testbench --target epd7 --junitxml junit_epd7.xml -v
 
@@ -88,6 +89,7 @@ jobs:
           AUTH_0_CLIENT_SECRET: ${{ secrets.AUTH_0_CLIENT_SECRET }}
           AUTH_0_AUDIENCE: ${{ secrets.AUTH_0_AUDIENCE }}
           AUTH_0_GRANT_TYPE: ${{ secrets.AUTH_0_GRANT_TYPE }}
+          HIL_RENDER_TIMEOUT: 240
         run: |
           python -m testbench.run_testbench --target epd13 --junitxml junit_epd13.xml -v
 
