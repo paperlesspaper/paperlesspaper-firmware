@@ -459,7 +459,7 @@ class TestEPD7Lifecycle:
         device.wait_for_pattern(r"(?:\[MAIN\] Device will update Image|\[AWS\] Request Image URL|\[AWS RX\] Picture URL Message)", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
         print(f"📥 [EPD7] Bildanforderung erkannt. Warte auf Download & Render...")
 
-        device.wait_for_pattern(r"\[DL\] Done", timeout=config.RENDER_TIMEOUT)
+        device.wait_for_pattern(r"\[DL\] Done", timeout=config.DOWNLOAD_TIMEOUT)
         print(f"✅ [EPD7] Bild erfolgreich vom Server heruntergeladen.")
 
         device.wait_for_pattern(r"\[EPD\] Set Image Done", timeout=config.RENDER_TIMEOUT + 30)
@@ -823,7 +823,7 @@ class TestEPD13Lifecycle:
         device.wait_for_pattern(r"(?:\[MAIN\] Device will update Image|\[AWS\] Request Image URL|\[AWS RX\] Picture URL Message)", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
         print(f"📥 [EPD13] Bildanforderung erkannt. Warte auf Download & Render...")
 
-        device.wait_for_pattern(r"\[DL\] Done", timeout=config.RENDER_TIMEOUT)
+        device.wait_for_pattern(r"\[DL\] Done", timeout=config.DOWNLOAD_TIMEOUT)
         print(f"✅ [EPD13] Bild erfolgreich vom Server heruntergeladen.")
 
         device.wait_for_pattern(r"\[EPD\] Set Image Done", timeout=config.RENDER_TIMEOUT + 30)

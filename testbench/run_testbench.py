@@ -90,8 +90,15 @@ def main():
     parser.add_argument("--junitxml", help="Pfad zur JUnit-XML-Ausgabedatei für Testprotokolle")
     parser.add_argument("--test-relay", help="Schaltet testweise ein Relais (z.B. COM8) und zeigt an, welches Display reagiert")
     parser.add_argument("--candidate-bin", help="Pfad zur Kandidaten-Firmware-Binärdatei (überschreibt CANDIDATE_FIRMWARE_EPD7/13)")
+    parser.add_argument("--render-timeout", type=int, help="Timeout in Sekunden für Bild-Download, Rendering und Quittung (Standard: 240s)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Ausführliche PyTest-Ausgabe")
     args = parser.parse_args()
+
+    if args.render_timeout:
+        os.environ["HIL_RENDER_TIMEOUT"] = str(args.render_timeout)
+        os.environ["HIL_DOWNLOAD_TIMEOUT"] = str(args.render_timeout)
+        config.RENDER_TIMEOUT = args.render_timeout
+        config.DOWNLOAD_TIMEOUT = args.render_timeout
 
     if args.candidate_bin:
         abs_bin = os.path.abspath(args.candidate_bin)

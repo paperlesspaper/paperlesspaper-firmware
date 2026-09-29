@@ -2722,39 +2722,16 @@ void test() {
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
 
-   delay(5000);
-   analogWrite(LED_PIN, 100);
-   chargeMode(true);
+   sprintf(charBuffer, "Voltage: %d mV", systemData.vddValue);
+   powerSupplyDisplay(true);
+   delay(100);
 
-   delay(5000);
-   analogWrite(LED_PIN, 0);
-   chargeMode(false);
+   displaySetText(charBuffer, false, true);
 
-   delay(5000);
-   analogWrite(LED_PIN, 100);
-   chargeMode(true);
-
-   delay(5000);
-   analogWrite(LED_PIN, 10);
-   chargeMode(true);
-
-   delay(5000);
-   gotToDeepSleep(3600, false, false);
-
-   if (powerSupplyDisplay(true)) delay(100);
-
-   File root = SPIFFS.open("/");
-   File file = root.openNextFile();
-   int fileCount = 0;
-   while (file) {
-      fileCount++;
-      Serial.print("[MAIN] CERT FILE: ");
-      Serial.println(file.name());
-
-      file = root.openNextFile();
+   while (true) {
+      Serial.printf("Start Voltage: %d mV\n", systemData.vddValue);
+      delay(5000);
    }
-   root.close();
-   file.close();
 
    // displaySetQrPartial();
    // displayPartialTest(false);

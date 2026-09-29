@@ -98,7 +98,8 @@ BOOT_TIMEOUT = int(os.environ.get("HIL_BOOT_TIMEOUT", "20"))
 BLE_READY_TIMEOUT = int(os.environ.get("HIL_BLE_READY_TIMEOUT", "60"))
 WIFI_CONNECT_TIMEOUT = int(os.environ.get("HIL_WIFI_TIMEOUT", "30"))
 OTA_UPDATE_TIMEOUT = int(os.environ.get("HIL_OTA_TIMEOUT", "180"))
-RENDER_TIMEOUT = int(os.environ.get("HIL_RENDER_TIMEOUT", "60"))
+DOWNLOAD_TIMEOUT = int(os.environ.get("HIL_DOWNLOAD_TIMEOUT", os.environ.get("HIL_RENDER_TIMEOUT", "240")))
+RENDER_TIMEOUT = int(os.environ.get("HIL_RENDER_TIMEOUT", "240"))
 DEEP_SLEEP_TIMEOUT = int(os.environ.get("HIL_SLEEP_TIMEOUT", "20"))
 
 # Standard-Pfade zu Firmware-Dateien & Produktions-Manifests
