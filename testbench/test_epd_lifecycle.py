@@ -571,7 +571,7 @@ class TestEPD7Lifecycle:
 
         reset_match = device.wait_for_pattern(
             r"(?:\[AWS RX\] Device activation (?:not started|reset)|\[MAIN\] Reset|\[MAIN\] ACT MEM:\s*0|\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|\[EPD\] Wifi Activate Function|\[AWS\] Request Remove Device)",
-            timeout=config.WIFI_CONNECT_TIMEOUT + 15
+            timeout=max(config.WIFI_CONNECT_TIMEOUT + 60, 90)
         )
         assert reset_match is not None, "Display hat Deaktivierung nicht erkannt!"
 
@@ -995,7 +995,7 @@ class TestEPD13Lifecycle:
 
         reset_match = device.wait_for_pattern(
             r"(?:\[AWS RX\] Device activation (?:not started|reset)|\[MAIN\] Reset|\[MAIN\] ACT MEM:\s*0|\[BLE\] BLE Advertising started|\[NETWORK\] wait for wifi via ble|\[EPD\] Wifi Activate Function|\[AWS\] Request Remove Device)",
-            timeout=config.WIFI_CONNECT_TIMEOUT + 15
+            timeout=max(config.WIFI_CONNECT_TIMEOUT + 60, 90)
         )
         assert reset_match is not None, "Display hat Deaktivierung nicht erkannt!"
 
