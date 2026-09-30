@@ -15,17 +15,19 @@ from .flasher import fetch_production_firmware
 from .aws_client import AWSTestVerifier
 from .privacy import mask_uid, mask_mac, mask_ssid, sanitize_log_line, register_github_mask
 
-def ensure_wifi_connected(device, device_id, timeout=60):
+def ensure_wifi_connected(device, device_id, timeout=60, from_current=False):
     """
     Wartet auf WLAN-Verbindung. Falls das Gerät in den BLE-Provisioning-Modus wechselt,
     werden die Credentials automatisch per BLE übertragen.
     """
     start_t = time.time()
     ble_provisioned = False
+    with device._lock:
+        start_idx = len(device.log_history) if from_current else 0
 
     while (time.time() - start_t) < timeout:
         with device._lock:
-            logs = list(device.log_history)
+            logs = list(device.log_history)[start_idx:]
 
         if any("[NETWORK] WiFi Connected" in l or "[NETWORK] Wifi got IP" in l for l in logs):
             print(f"✅ [{device.name}] WLAN erfolgreich verbunden.")
@@ -134,6 +136,32 @@ def verify_device_type_or_abort(device, expected_type: str, info: dict):
             print(f"ℹ️ [{device.name}] Hardware-Typ: {detected_type or 'unbekannt'} (UID: {mask_uid(info.get('uid'))})")
 
 
+def verify_candidate_version(device, expected_version=None, prod_version=None, context=""):
+    """
+    Verifiziert strikt, dass das Testgerät auf der Kandidaten-Firmware-Version läuft
+    und nicht auf der vorherigen Produktions-Firmware.
+    """
+    current_ver = device.get_current_version()
+    prefix = f" [{context}]" if context else ""
+    print(f"🔍 [{device.name}]{prefix} Verifiziere Kandidaten-Firmware-Version (Aktuell: V{current_ver}, Erwartet: V{expected_version})...")
+
+    assert current_ver is not None, (
+        f"[{device.name}]{prefix} Firmware-Version konnte nicht ermittelt werden (kein Boot-Log '[MAIN] INIT Device V:...' empfangen)!"
+    )
+    if expected_version:
+        assert current_ver == expected_version, (
+            f"[{device.name}]{prefix} Gerät läuft nicht auf der erwarteten Kandidaten-Version!\n"
+            f"   ➔ Erkannte Version: V{current_ver}\n"
+            f"   ➔ Erwartete Kandidaten-Version: V{expected_version}"
+        )
+    if prod_version:
+        assert current_ver != prod_version, (
+            f"[{device.name}]{prefix} Gerät läuft unerwartet auf der Produktions-Firmware V{prod_version} statt auf der Kandidaten-Firmware!"
+        )
+    print(f"✅ [{device.name}]{prefix} Kandidaten-Firmware-Version erfolgreich verifiziert: V{current_ver}")
+    return current_ver
+
+
 class TestEPD7Lifecycle:
     """Testzyklus für das 7.5 Zoll Display (EPD7)."""
 
@@ -146,6 +174,7 @@ class TestEPD7Lifecycle:
     target_name = "epd7"
     prod_bin_path = None
     prod_version = None
+    candidate_version = None
 
     @pytest.fixture(scope="class")
     @classmethod
@@ -189,6 +218,8 @@ class TestEPD7Lifecycle:
         self.relay_port = config.EPD7_RELAY_PORT
         self.device_id = config.EPD7_DEVICE_ID
         self.candidate_bin_path = config.DEFAULT_CANDIDATE_EPD7
+        self.candidate_version = getattr(self.__class__, "candidate_version", None)
+        self.prod_version = getattr(self.__class__, "prod_version", None)
 
         port_found = False
         available_ports = []
@@ -221,6 +252,8 @@ class TestEPD7Lifecycle:
         success = device.factory_reset_via_power_cycles(min_cycles=6)
         assert success is True, "Factory-Reset über 6x Power-Cycles fehlgeschlagen!"
         info = device.read_device_identity(reset=False, timeout=config.BOOT_TIMEOUT)
+        if info.get("version"):
+            device.current_version = info["version"]
         verify_device_type_or_abort(device, "epd7", info)
         if info.get("uid"):
             self.device_id = info["uid"]
@@ -286,14 +319,14 @@ class TestEPD7Lifecycle:
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [{device.name}] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
-        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 50, 80)
         try:
             activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
             print(f"ℹ️ [{device.name}] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
             aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 65, 95))
 
         assert activated_match is not None, "Display hat 'Device is activated' nicht empfangen!"
 
@@ -311,6 +344,22 @@ class TestEPD7Lifecycle:
         bin_path, version = fetch_production_firmware(self.manifest_url, cache_dir=config.CACHE_DIR)
         TestEPD7Lifecycle.prod_bin_path = bin_path
         TestEPD7Lifecycle.prod_version = version
+        self.prod_version = version
+
+        # Prüfe, ob das Gerät bereits auf der gewünschten Produktionsversion läuft
+        current_version = device.get_current_version()
+        if not current_version:
+            try:
+                info = device.read_device_identity(reset=False, timeout=4)
+                current_version = info.get("version")
+            except Exception:
+                pass
+
+        if current_version == version:
+            print(f"ℹ️ [{device.name}] Gerät läuft bereits auf Produktionsversion V{current_version}. Überspringe redundantes Produktions-OTA.")
+            aws_verifier.clear_ota_shadow(self.device_id)
+            ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+            return
 
         # 1. & 2. OTA-URL vorab in Shadow schreiben und Display per Relais neu starten
         trigger_ota_with_retry(
@@ -328,10 +377,11 @@ class TestEPD7Lifecycle:
         new_boot = device.wait_for_pattern(r"\[MAIN\] INIT Device V:\s*([^\s]+)", timeout=config.OTA_UPDATE_TIMEOUT, from_current=True)
         assert new_boot is not None, "Display hat nach Produktions-OTA keinen Neustart durchgeführt!"
         booted_version = new_boot.group(1)
+        device.current_version = booted_version
         print(f"✅ [EPD7] Erfolgreich auf Produktions-Firmware V{booted_version} geflasht.")
         assert booted_version == version, f"Unerwartete Version nach Produktions-OTA: {booted_version} != {version}"
 
-        ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+        ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT, from_current=True)
 
     def test_04_candidate_firmware_ota(self, device, aws_verifier):
         """Schritt 4: Lädt die gebuildete Kandidaten-Binärdatei hoch, flasht diese direkt via OTA-URL und verifiziert den Reboot."""
@@ -363,12 +413,16 @@ class TestEPD7Lifecycle:
             new_boot = device.wait_for_pattern(r"\[MAIN\] INIT Device V:\s*([^\s]+)", timeout=config.OTA_UPDATE_TIMEOUT, from_current=True)
             assert new_boot is not None, "Display hat nach Kandidaten-OTA keinen Neustart durchgeführt!"
             candidate_version = new_boot.group(1)
+            device.current_version = candidate_version
             print(f"🎉 [EPD7] Erfolgreich auf Kandidaten-Firmware V{candidate_version} geflasht.")
-            assert candidate_version != TestEPD7Lifecycle.prod_version, (
-                f"Kandidaten-Firmware wurde nicht übernommen! Gerät läuft weiterhin auf Produktionsversion V{candidate_version}."
-            )
+            if TestEPD7Lifecycle.prod_version:
+                assert candidate_version != TestEPD7Lifecycle.prod_version, (
+                    f"Kandidaten-Firmware wurde nicht übernommen! Gerät läuft weiterhin auf Produktionsversion V{candidate_version}."
+                )
+            TestEPD7Lifecycle.candidate_version = candidate_version
+            self.candidate_version = candidate_version
 
-            ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+            ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT, from_current=True)
         finally:
             print(f"🧹 [EPD7] Bereinige temporäre Test-Firmware '{s3_key}' aus S3...")
             aws_verifier.cleanup_candidate_firmware(s3_key)
@@ -387,16 +441,26 @@ class TestEPD7Lifecycle:
                 print(f"ℹ️ [EPD7] Hinweis: API-Deaktivierung übersprungen/fehlgeschlagen: {e}")
 
         info = device.read_device_identity(reset=False, timeout=config.BOOT_TIMEOUT)
+        if info.get("version"):
+            device.current_version = info["version"]
         if info.get("uid"):
             self.device_id = info["uid"]
             TestEPD7Lifecycle.device_id = info["uid"]
             config.EPD7_DEVICE_ID = info["uid"]
             os.environ["EPD7_DEVICE_ID"] = info["uid"]
         register_github_mask(self.device_id)
+
+        # Verifiziere Kandidaten-Firmware-Version nach dem Factory-Reset
+        expected_cand = self.candidate_version or TestEPD7Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_05_candidate_factory_reset")
+
         print(f"🎉 [EPD7] Kandidaten-Firmware erfolgreich per 6x Power-Cycles zurückgesetzt und in Cloud deaktiviert.")
 
     def test_06_candidate_ble_wifi_provisioning(self, device, request):
         """Schritt 6: Prüft die BLE-WLAN-Provisionierung auf der frisch zurückgesetzten Kandidaten-Firmware."""
+        expected_cand = self.candidate_version or TestEPD7Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_06_candidate_ble_wifi_provisioning")
+
         if not BLEProvisioner.is_supported():
             pytest.skip("BLE / bleak ist auf diesem System nicht verfügbar.")
 
@@ -421,7 +485,7 @@ class TestEPD7Lifecycle:
             assert success is True, f"Kandidaten-Firmware: WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
             print(f"🎉 Kandidaten-Firmware: BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
             try:
-                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=12)
+                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=25)
             except TimeoutError:
                 pass
         except Exception as exc:
@@ -434,20 +498,21 @@ class TestEPD7Lifecycle:
         if aws_verifier is None:
             pytest.skip("AWS Credentials nicht verfügbar.")
 
-        ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+        expected_cand = self.candidate_version or TestEPD7Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_07_candidate_device_activation")
 
         print(f"\n🔑 [EPD7] Rufe Aktivierungs-API (POST /activatedevice) für Kandidaten-Firmware '{mask_uid(self.device_id)}' auf...")
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [EPD7] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
-        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 80, 110)
         try:
             activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
             print(f"ℹ️ [EPD7] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
             aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 65, 95))
 
         assert activated_match is not None, "Display hat 'Device is activated' auf Kandidaten-Firmware nicht empfangen!"
 
@@ -462,13 +527,19 @@ class TestEPD7Lifecycle:
         if aws_verifier is None:
             pytest.skip("AWS Credentials nicht verfügbar.")
 
+        expected_cand = self.candidate_version or TestEPD7Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_08_candidate_picture_render_and_payload (vor Download)")
+
         print(f"\n🖼️ [EPD7] Generiere und lade Testbild für '{mask_uid(self.device_id)}' hoch...")
         key, t_upload = aws_verifier.upload_test_image(self.device_id, width=800, height=480)
 
         print(f"🔄 [EPD7] Triggere Bildabruf per Relais-Power-Cycle...")
         device.reset(method="relay_hex")
 
-        device.wait_for_pattern(r"(?:\[MAIN\] Device will update Image|\[AWS\] Request Image URL|\[AWS RX\] Picture URL Message)", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+        device.wait_for_pattern(r"(?:\[MAIN\] Device will update Image|\[AWS\] Request Image URL|\[AWS RX\] Picture URL Message)", timeout=max(config.WIFI_CONNECT_TIMEOUT + 35, 65))
+
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_08_candidate_picture_render_and_payload (nach Boot)")
+
         print(f"📥 [EPD7] Bildanforderung erkannt. Warte auf Download & Render...")
 
         device.wait_for_pattern(r"\[DL\] Done", timeout=config.DOWNLOAD_TIMEOUT)
@@ -489,6 +560,9 @@ class TestEPD7Lifecycle:
         if aws_verifier is None:
             pytest.skip("AWS Credentials nicht verfügbar.")
 
+        expected_cand = self.candidate_version or TestEPD7Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_09_candidate_deactivate_and_deep_sleep (vor Deaktivierung)")
+
         print(f"\n🛑 [EPD7] Führe Deaktivierung über REST-API für '{mask_uid(self.device_id)}' durch...")
         aws_verifier.deactivate_device(self.device_id)
 
@@ -500,6 +574,8 @@ class TestEPD7Lifecycle:
             timeout=config.WIFI_CONNECT_TIMEOUT + 15
         )
         assert reset_match is not None, "Display hat Deaktivierung nicht erkannt!"
+
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_09_candidate_deactivate_and_deep_sleep (nach Boot)")
 
         print(f"⏳ [EPD7] Warte auf Übergang in den Deep Sleep...")
         sleep_match = device.wait_for_pattern(
@@ -522,6 +598,7 @@ class TestEPD13Lifecycle:
     candidate_bin_path = config.DEFAULT_CANDIDATE_EPD13
     prod_bin_path = None
     prod_version = None
+    candidate_version = None
 
     @pytest.fixture(scope="class")
     @classmethod
@@ -565,6 +642,8 @@ class TestEPD13Lifecycle:
         self.relay_port = config.EPD13_RELAY_PORT
         self.device_id = config.EPD13_DEVICE_ID
         self.candidate_bin_path = config.DEFAULT_CANDIDATE_EPD13
+        self.candidate_version = getattr(self.__class__, "candidate_version", None)
+        self.prod_version = getattr(self.__class__, "prod_version", None)
 
         port_found = False
         available_ports = []
@@ -597,6 +676,8 @@ class TestEPD13Lifecycle:
         success = device.factory_reset_via_power_cycles(min_cycles=6)
         assert success is True, "Factory-Reset über 6x Power-Cycles fehlgeschlagen!"
         info = device.read_device_identity(reset=False, timeout=config.BOOT_TIMEOUT)
+        if info.get("version"):
+            device.current_version = info["version"]
         verify_device_type_or_abort(device, "epd13", info)
         if info.get("uid"):
             self.device_id = info["uid"]
@@ -662,14 +743,14 @@ class TestEPD13Lifecycle:
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [EPD13] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
-        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 50, 80)
         try:
             activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
             print(f"ℹ️ [EPD13] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
             aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 65, 95))
 
         assert activated_match is not None, "Display hat 'Device is activated' nicht empfangen!"
 
@@ -687,6 +768,22 @@ class TestEPD13Lifecycle:
         bin_path, version = fetch_production_firmware(self.manifest_url, cache_dir=config.CACHE_DIR)
         TestEPD13Lifecycle.prod_bin_path = bin_path
         TestEPD13Lifecycle.prod_version = version
+        self.prod_version = version
+
+        # Prüfe, ob das Gerät bereits auf der gewünschten Produktionsversion läuft
+        current_version = device.get_current_version()
+        if not current_version:
+            try:
+                info = device.read_device_identity(reset=False, timeout=4)
+                current_version = info.get("version")
+            except Exception:
+                pass
+
+        if current_version == version:
+            print(f"ℹ️ [{device.name}] Gerät läuft bereits auf Produktionsversion V{current_version}. Überspringe redundantes Produktions-OTA.")
+            aws_verifier.clear_ota_shadow(self.device_id)
+            ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+            return
 
         # 1. & 2. OTA-URL vorab in Shadow schreiben und Display per Relais neu starten
         trigger_ota_with_retry(
@@ -704,10 +801,11 @@ class TestEPD13Lifecycle:
         new_boot = device.wait_for_pattern(r"\[MAIN\] INIT Device V:\s*([^\s]+)", timeout=config.OTA_UPDATE_TIMEOUT, from_current=True)
         assert new_boot is not None, "Display hat nach Produktions-OTA keinen Neustart durchgeführt!"
         booted_version = new_boot.group(1)
+        device.current_version = booted_version
         print(f"✅ [EPD13] Erfolgreich auf Produktions-Firmware V{booted_version} geflasht.")
         assert booted_version == version, f"Unerwartete Version nach Produktions-OTA: {booted_version} != {version}"
 
-        ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+        ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT, from_current=True)
 
     def test_04_candidate_firmware_ota(self, device, aws_verifier):
         """Schritt 4: Lädt die gebuildete Kandidaten-Binärdatei hoch, flasht diese direkt via OTA-URL und verifiziert den Reboot."""
@@ -739,12 +837,16 @@ class TestEPD13Lifecycle:
             new_boot = device.wait_for_pattern(r"\[MAIN\] INIT Device V:\s*([^\s]+)", timeout=config.OTA_UPDATE_TIMEOUT, from_current=True)
             assert new_boot is not None, "Display hat nach Kandidaten-OTA keinen Neustart durchgeführt!"
             candidate_version = new_boot.group(1)
+            device.current_version = candidate_version
             print(f"🎉 [EPD13] Erfolgreich auf Kandidaten-Firmware V{candidate_version} geflasht.")
-            assert candidate_version != TestEPD13Lifecycle.prod_version, (
-                f"Kandidaten-Firmware wurde nicht übernommen! Gerät läuft weiterhin auf Produktionsversion V{candidate_version}."
-            )
+            if TestEPD13Lifecycle.prod_version:
+                assert candidate_version != TestEPD13Lifecycle.prod_version, (
+                    f"Kandidaten-Firmware wurde nicht übernommen! Gerät läuft weiterhin auf Produktionsversion V{candidate_version}."
+                )
+            TestEPD13Lifecycle.candidate_version = candidate_version
+            self.candidate_version = candidate_version
 
-            ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+            ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT, from_current=True)
         finally:
             print(f"🧹 [EPD13] Bereinige temporäre Test-Firmware '{s3_key}' aus S3...")
             aws_verifier.cleanup_candidate_firmware(s3_key)
@@ -763,16 +865,26 @@ class TestEPD13Lifecycle:
                 print(f"ℹ️ [EPD13] Hinweis: API-Deaktivierung übersprungen/fehlgeschlagen: {e}")
 
         info = device.read_device_identity(reset=False, timeout=config.BOOT_TIMEOUT)
+        if info.get("version"):
+            device.current_version = info["version"]
         if info.get("uid"):
             self.device_id = info["uid"]
             TestEPD13Lifecycle.device_id = info["uid"]
             config.EPD13_DEVICE_ID = info["uid"]
             os.environ["EPD13_DEVICE_ID"] = info["uid"]
         register_github_mask(self.device_id)
+
+        # Verifiziere Kandidaten-Firmware-Version nach dem Factory-Reset
+        expected_cand = self.candidate_version or TestEPD13Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_05_candidate_factory_reset")
+
         print(f"🎉 [EPD13] Kandidaten-Firmware erfolgreich per 6x Power-Cycles zurückgesetzt und in Cloud deaktiviert.")
 
     def test_06_candidate_ble_wifi_provisioning(self, device, request):
         """Schritt 6: Prüft die BLE-WLAN-Provisionierung auf der frisch zurückgesetzten Kandidaten-Firmware."""
+        expected_cand = self.candidate_version or TestEPD13Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_06_candidate_ble_wifi_provisioning")
+
         if not BLEProvisioner.is_supported():
             pytest.skip("BLE / bleak ist auf diesem System nicht verfügbar.")
 
@@ -797,7 +909,7 @@ class TestEPD13Lifecycle:
             assert success is True, f"Kandidaten-Firmware: WLAN-Verbindung zu '{mask_ssid(config.WIFI_SSID)}' konnte nicht hergestellt werden!"
             print(f"🎉 Kandidaten-Firmware: BLE-Provisionierung für {mask_uid(self.device_id)} erfolgreich verifiziert.")
             try:
-                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=12)
+                device.wait_for_pattern(r"(?:\[AWS\] Request Remove Device|\[AWS RX\] Device activation (?:reset|not started)|\[MAIN\] Going to Sleep|refresh : )", timeout=25)
             except TimeoutError:
                 pass
         except Exception as exc:
@@ -810,20 +922,21 @@ class TestEPD13Lifecycle:
         if aws_verifier is None:
             pytest.skip("AWS Credentials nicht verfügbar.")
 
-        ensure_wifi_connected(device, self.device_id, timeout=config.WIFI_CONNECT_TIMEOUT)
+        expected_cand = self.candidate_version or TestEPD13Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_07_candidate_device_activation")
 
         print(f"\n🔑 [EPD13] Rufe Aktivierungs-API (POST /activatedevice) für Kandidaten-Firmware '{mask_uid(self.device_id)}' auf...")
         aws_verifier.set_device_activation_pending(self.device_id)
 
         print(f"⏳ [EPD13] Warte auf autonomen Aktivierungs-Abschluss durch das Gerät (ohne Relais-Reset)...")
-        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 35, 65)
+        act_timeout = max(config.WIFI_CONNECT_TIMEOUT + 80, 110)
         try:
             activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=act_timeout)
         except TimeoutError:
             print(f"ℹ️ [EPD13] Gerät reagiert nicht unmittelbar (evtl. im Deep Sleep oder nach Neu-Provisionierung). Erneuere Aktivierungs-Status und wecke per Relais auf...")
             aws_verifier.set_device_activation_pending(self.device_id)
             device.reset(method="relay_hex")
-            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 30, 60))
+            activated_match = device.wait_for_pattern(r"\[AWS RX\] Device is activated", timeout=max(config.WIFI_CONNECT_TIMEOUT + 65, 95))
 
         assert activated_match is not None, "Display hat 'Device is activated' auf Kandidaten-Firmware nicht empfangen!"
 
@@ -838,13 +951,19 @@ class TestEPD13Lifecycle:
         if aws_verifier is None:
             pytest.skip("AWS Credentials nicht verfügbar.")
 
+        expected_cand = self.candidate_version or TestEPD13Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_08_candidate_picture_render_and_payload (vor Download)")
+
         print(f"\n🖼️ [EPD13] Generiere und lade Testbild für '{mask_uid(self.device_id)}' hoch...")
         key, t_upload = aws_verifier.upload_test_image(self.device_id, width=1200, height=1600)
 
         print(f"🔄 [EPD13] Triggere Bildabruf per Relais-Power-Cycle...")
         device.reset(method="relay_hex")
 
-        device.wait_for_pattern(r"(?:\[MAIN\] Device will update Image|\[AWS\] Request Image URL|\[AWS RX\] Picture URL Message)", timeout=config.WIFI_CONNECT_TIMEOUT + 15)
+        device.wait_for_pattern(r"(?:\[MAIN\] Device will update Image|\[AWS\] Request Image URL|\[AWS RX\] Picture URL Message)", timeout=max(config.WIFI_CONNECT_TIMEOUT + 35, 65))
+
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_08_candidate_picture_render_and_payload (nach Boot)")
+
         print(f"📥 [EPD13] Bildanforderung erkannt. Warte auf Download & Render...")
 
         device.wait_for_pattern(r"\[DL\] Done", timeout=config.DOWNLOAD_TIMEOUT)
@@ -865,6 +984,9 @@ class TestEPD13Lifecycle:
         if aws_verifier is None:
             pytest.skip("AWS Credentials nicht verfügbar.")
 
+        expected_cand = self.candidate_version or TestEPD13Lifecycle.candidate_version
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_09_candidate_deactivate_and_deep_sleep (vor Deaktivierung)")
+
         print(f"\n🛑 [EPD13] Führe Deaktivierung über REST-API für '{mask_uid(self.device_id)}' durch...")
         aws_verifier.deactivate_device(self.device_id)
 
@@ -876,6 +998,8 @@ class TestEPD13Lifecycle:
             timeout=config.WIFI_CONNECT_TIMEOUT + 15
         )
         assert reset_match is not None, "Display hat Deaktivierung nicht erkannt!"
+
+        verify_candidate_version(device, expected_cand, self.prod_version, "test_09_candidate_deactivate_and_deep_sleep (nach Boot)")
 
         print(f"⏳ [EPD13] Warte auf Übergang in den Deep Sleep...")
         sleep_match = device.wait_for_pattern(

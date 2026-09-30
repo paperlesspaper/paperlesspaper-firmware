@@ -44,6 +44,22 @@ class ESP32HardwareController:
         self.log_history = []
         self._new_line_event = threading.Event()
         self._lock = threading.Lock()
+        self.current_version = None
+
+    def get_current_version(self):
+        """
+        Gibt die aktuellste auf dem Gerät erkannte Firmware-Version zurück.
+        Sucht rückwärts in log_history oder gibt self.current_version zurück.
+        """
+        with self._lock:
+            if self.current_version:
+                return self.current_version
+            for line in reversed(self.log_history):
+                m = re.search(r"\[MAIN\] INIT Device V:\s*([^\s]+)", line)
+                if m:
+                    self.current_version = m.group(1)
+                    return self.current_version
+        return None
 
     def connect(self):
         """Öffnet die serielle Schnittstelle und startet den Hintergrund-Reader."""
@@ -109,6 +125,9 @@ class ESP32HardwareController:
                     if line:
                         with self._lock:
                             self.log_history.append(line)
+                            m_ver = re.search(r"\[MAIN\] INIT Device V:\s*([^\s]+)", line)
+                            if m_ver:
+                                self.current_version = m_ver.group(1)
                             self._new_line_event.set()
             except Exception:
                 if not self._running:
@@ -442,6 +461,7 @@ class ESP32HardwareController:
                     m_ver = version_regex.search(line)
                     if m_ver:
                         version = m_ver.group(1)
+                        self.current_version = version
 
                 if not mac_colons:
                     m_mac = mac_regex.search(line)
