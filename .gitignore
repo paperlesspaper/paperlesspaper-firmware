@@ -22,3 +22,4 @@ __pycache__/
 testbench/hardware_mapping.json
 pilot_recommendations*
 risk_report.md
+canary_health_report.*

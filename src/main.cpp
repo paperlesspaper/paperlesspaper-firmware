@@ -2665,6 +2665,7 @@ bool chargeMode(bool enable) {
    } else {
       digitalWrite(CHG_EN_PIN, LOW);
       pinMode(CHG_EN_PIN, OUTPUT);
+      digitalWrite(CHG_EN_PIN, LOW);
       gpio_hold_dis((gpio_num_t)CHG_EN_PIN);  // alten Hold ggf. erneuern
       gpio_hold_en((gpio_num_t)CHG_EN_PIN);   // im LP_AON sperren
       Serial.println("[CHARGE] off - Charge OFF");
@@ -2945,6 +2946,7 @@ void setup() {
       displaySetText("DEV OTA Update...", true, true);
       ledBlink(2000, true, LED_DIM_VALUE);
       Serial.println("[OTA] Dev OTA Started.....");
+      tickerFailsave.detach();
       writeIntToFlash(0, 170);
       resetAll(false, false);
       myEsp32FOTA.execOTA();
@@ -2961,6 +2963,7 @@ void setup() {
       displayOtaScreen();
       ledBlink(2000, true, LED_DIM_VALUE);
       Serial.println("[OTA] OTA Started.....");
+      tickerFailsave.detach();
       writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
       resetAll(false, false);
       myEsp32FOTA.execOTA();

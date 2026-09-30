@@ -37,6 +37,54 @@ except ImportError:
     ClientError = Exception
 
 
+_REGISTERED_MASKS = set()
+
+
+def register_github_mask(value):
+    """Registriert sensible Werte bei GitHub Actions als Secret für automatische Konsolenmaskierung."""
+    if not value or not os.environ.get("GITHUB_ACTIONS"):
+        return
+    val_str = str(value).strip()
+    if len(val_str) < 5 or val_str in _REGISTERED_MASKS:
+        return
+    if val_str.lower() in ("true", "false", "epd7", "epd13", "relay_hex", "eu-central-1", "all", "none"):
+        return
+    _REGISTERED_MASKS.add(val_str)
+    print(f"::add-mask::{val_str}")
+
+
+def mask_epd_id(uid):
+    """
+    Maskiert eine E-Paper Gerätekennung für Berichte und Protokolle.
+    Sicherheits-Garantie:
+    - Maskiert den Großteil der Seriennummer/MAC mit '***'
+    - Macht AUF JEDEN FALL die vorletzte Stelle unkenntlich (ersetzt durch '*')
+    - Verhindert Rückschlüsse auf Kunden oder Hardware-Batches
+
+    Beispiele:
+    - 'epd7-e4b0634f3354'  -> 'epd7-***3*4'  (vorletzte Stelle '5' ist unkenntlich '*')
+    - 'epd13-58e6c5c29248' -> 'epd13-***2*8' (vorletzte Stelle '4' ist unkenntlich '*')
+    - 'epd7-704988'        -> 'epd7-***9*8'  (vorletzte Stelle '8' ist unkenntlich '*')
+    - '58e6c5c29248'       -> '***2*8'
+    """
+    if not uid:
+        return ""
+    uid_str = str(uid).strip()
+    register_github_mask(uid_str)
+
+    prefix = ""
+    rest = uid_str
+    if "-" in uid_str:
+        prefix, rest = uid_str.split("-", 1)
+        prefix = f"{prefix}-"
+
+    if len(rest) <= 2:
+        return f"{prefix}***"
+    if len(rest) == 3:
+        return f"{prefix}***{rest[0]}*{rest[-1]}"
+    return f"{prefix}***{rest[-3]}*{rest[-1]}"
+
+
 def _load_env():
     possible_paths = [
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
@@ -131,11 +179,16 @@ def query_device_catalog(catalog_table, device_id):
 def query_device_payload_ack(payload_table, device_id, min_timestamp_ms=0):
     """
     Prüft in DynamoDB iotPayload, ob für das Gerät kürzlich ein Update-Quittierungs-Event
-    (z. B. EventType 'state' oder EventMessage 'update_ok') abgelegt wurde.
+    (z. B. EventType 'state' oder EventMessage 'update_ok' / 'update_failed') abgelegt wurde.
     """
+    if payload_table is None:
+        return None
+
     candidates = [str(device_id)]
     if "-" in device_id:
         candidates.append(device_id.split("-", 1)[1])
+    else:
+        candidates.extend([f"epd7-{device_id}", f"epd13-{device_id}"])
 
     for cand in candidates:
         try:
@@ -143,7 +196,7 @@ def query_device_payload_ack(payload_table, device_id, min_timestamp_ms=0):
                 KeyConditionExpression="DeviceId = :dev_id",
                 ExpressionAttributeValues={":dev_id": cand},
                 ScanIndexForward=False,
-                Limit=5
+                Limit=10
             )
             for it in res.get("Items", []):
                 ts = int(it.get("EventTimestamp") or it.get("AwsTimestamp") or 0)
@@ -151,7 +204,7 @@ def query_device_payload_ack(payload_table, device_id, min_timestamp_ms=0):
                     msg = str(it.get("EventMessage", "")).lower()
                     ev_type = str(it.get("EventType", "")).lower()
                     status = str(it.get("status", "")).lower()
-                    if "update_ok" in msg or "update" in ev_type or "ok" in status:
+                    if "update_ok" in msg or "update_ok" in status or (ev_type == "state" and "ok" in msg) or "update_failed" in msg:
                         return it
         except ClientError as e:
             print(f"⚠️ DynamoDB Payload Query Fehler für '{cand}': {e}")
@@ -159,20 +212,23 @@ def query_device_payload_ack(payload_table, device_id, min_timestamp_ms=0):
     return None
 
 
-def evaluate_device_health(item, payload_ack, target_version=None, start_time_ts=0):
+def evaluate_device_health(item, payload_ack, target_version=None, start_time_ts=0, require_ack=True):
     """
     Bewertet den Gesundheitszustand eines Zielgeräts:
     - Version matchen (target_version erreicht?)
+    - Quittierungs-Event ('update_ok' in iotPayload oder iotCatalog)
     - StartCounter (Crash-Loop-Erkennung)
     - Heartbeat / Timeout Überwachung
     - Batteriestand
-    - Quittierungs-Event
     """
     if not item:
         return {
             "status": "NOT_FOUND",
             "is_healthy": False,
             "version_matched": False,
+            "is_adopted": False,
+            "has_ack": False,
+            "ack_message": None,
             "anomalies": ["Gerät nicht in DynamoDB iotCatalog gefunden"]
         }
 
@@ -236,9 +292,39 @@ def evaluate_device_health(item, payload_ack, target_version=None, start_time_ts
     if start_time_ts > 0 and (last_update_sec < start_time_ts) and (now - start_time_ts > max_silent_allowed):
         anomalies.append(f"Gerät überfällig: Keine Meldung seit {int(now - start_time_ts)}s (Timeout: {timeout_sec}s)")
 
+    # 4. Quittierungs-Prüfung ('update_ok' in iotPayload oder iotCatalog)
+    has_ack = False
+    ack_message = None
+
+    if payload_ack is not None:
+        p_msg = str(payload_ack.get("EventMessage", "")).lower()
+        p_type = str(payload_ack.get("EventType", "")).lower()
+        p_st = str(payload_ack.get("status", "")).lower()
+        if "update_ok" in p_msg or "update_ok" in p_st or (p_type == "state" and "ok" in p_msg):
+            has_ack = True
+            ack_message = "update_ok (iotPayload)"
+        elif "update_failed" in p_msg or "update_failed" in p_st:
+            anomalies.append("Gerät meldet 'update_failed' in DynamoDB iotPayload!")
+
+    # Ergänzende Quittierungs-Prüfung in DynamoDB iotCatalog (updatePending)
+    up_pending = str(item.get("updatePending", "")).lower()
+    if "update_ok" in up_pending:
+        if start_time_ts == 0 or last_update_sec >= (start_time_ts - 10):
+            has_ack = True
+            ack_message = ack_message or "update_ok (iotCatalog)"
+    elif "update_failed" in up_pending:
+        if start_time_ts == 0 or last_update_sec >= (start_time_ts - 10):
+            anomalies.append("Gerät meldet 'update_failed' in DynamoDB iotCatalog!")
+
+    # Adoptions-Kriterium: Version muss stimmen UND (falls required) 'update_ok' vorhanden sein
+    ack_satisfied = (has_ack or not require_ack)
+    is_adopted = version_matched and ack_satisfied
+
     # Status ermitteln
-    if version_matched and not anomalies:
+    if version_matched and ack_satisfied and not anomalies:
         health_status = "UPDATED_HEALTHY"
+    elif version_matched and not ack_satisfied and not anomalies:
+        health_status = "UPDATED_WAITING_ACK"
     elif version_matched and anomalies:
         health_status = "UPDATED_WARNING"
     elif not version_matched and anomalies:
@@ -254,6 +340,7 @@ def evaluate_device_health(item, payload_ack, target_version=None, start_time_ts
         "status": health_status,
         "is_healthy": is_healthy,
         "version_matched": version_matched,
+        "is_adopted": is_adopted,
         "current_version": current_version,
         "target_version": target_version,
         "start_counter": start_counter,
@@ -261,12 +348,13 @@ def evaluate_device_health(item, payload_ack, target_version=None, start_time_ts
         "timeout_sec": timeout_sec,
         "last_update_sec": last_update_sec,
         "seconds_since_update": seconds_since_update,
-        "has_ack": payload_ack is not None,
+        "has_ack": has_ack,
+        "ack_message": ack_message,
         "anomalies": anomalies
     }
 
 
-def analyze_canary_fleet(catalog_table, payload_table, target_devices, target_version=None, start_time_ts=0, mock_items=None):
+def analyze_canary_fleet(catalog_table, payload_table, target_devices, target_version=None, start_time_ts=0, mock_items=None, require_ack=True):
     """Fragt alle Zielgeräte ab und aggregiert Flottenmetriken."""
     results = {}
     updated_count = 0
@@ -286,12 +374,13 @@ def analyze_canary_fleet(catalog_table, payload_table, target_devices, target_ve
             item,
             ack,
             target_version=target_version,
-            start_time_ts=start_time_ts
+            start_time_ts=start_time_ts,
+            require_ack=require_ack
         )
 
         results[dev_id] = evaluation
 
-        if evaluation["version_matched"]:
+        if evaluation["is_adopted"]:
             updated_count += 1
         if evaluation["is_healthy"]:
             healthy_count += 1
@@ -301,16 +390,19 @@ def analyze_canary_fleet(catalog_table, payload_table, target_devices, target_ve
     total = len(target_devices)
     adoption_rate = round((updated_count / total * 100.0), 1) if total > 0 else 0.0
     healthy_rate = round((healthy_count / total * 100.0), 1) if total > 0 else 0.0
+    waiting_ack_count = sum(1 for d in results.values() if d.get("status") == "UPDATED_WAITING_ACK")
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "total_targets": total,
         "updated_count": updated_count,
+        "waiting_ack_count": waiting_ack_count,
         "adoption_rate_pct": adoption_rate,
         "healthy_count": healthy_count,
         "healthy_rate_pct": healthy_rate,
         "anomalies_count": anomalies_count,
         "target_version": target_version,
+        "require_ack": require_ack,
         "devices": results
     }
 
@@ -321,6 +413,7 @@ def generate_markdown_report(metrics, output_file="canary_health_report.md"):
     updated = metrics["updated_count"]
     adoption = metrics["adoption_rate_pct"]
     anomalies = metrics["anomalies_count"]
+    waiting_ack = metrics.get("waiting_ack_count", 0)
     target_v = metrics.get("target_version") or "nicht angegeben"
 
     status_badge = "🟢 BESTANDEN" if (adoption >= 100.0 and anomalies == 0) else (
@@ -334,19 +427,26 @@ def generate_markdown_report(metrics, output_file="canary_health_report.md"):
         "",
         "### 📊 Zusammenfassung",
         f"- **Überwachte Pilotgeräte:** {total}",
-        f"- **Erfolgreich aktualisiert:** {updated} / {total} (**{adoption}%**)",
+        f"- **Erfolgreich aktualisiert & quittiert:** {updated} / {total} (**{adoption}%**)"
+    ]
+
+    if waiting_ack > 0:
+        lines.append(f"- **Warten auf 'update_ok' Quittung:** {waiting_ack} / {total}")
+
+    lines.extend([
         f"- **Stabile Geräte:** {metrics['healthy_count']} / {total} (**{metrics['healthy_rate_pct']}%**)",
         f"- **Erkannte Anomalien/Warnungen:** **{anomalies}**",
         "",
         "### 📋 Gerätestatus-Details",
-        "| Gerät / Thing | Status | Version | Akku | StartCounter | Quittung | Anomalien / Hinweise |",
+        "| Gerät / Thing | Status | Version | Akku | StartCounter | Quittung (update_ok) | Anomalien / Hinweise |",
         "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
-    ]
+    ])
 
     for dev_id, d in metrics["devices"].items():
         st = d.get("status", "UNKNOWN")
         st_icon = {
-            "UPDATED_HEALTHY": "🟢 Aktualisiert",
+            "UPDATED_HEALTHY": "🟢 Aktualisiert & Quittiert",
+            "UPDATED_WAITING_ACK": "⏳ Aktualisiert (Warte auf update_ok)",
             "UPDATED_WARNING": "🟡 Aktualisiert (Warnung)",
             "PENDING_WAITING": "⏳ Ausstehend (Wartet)",
             "PENDING_OVERDUE": "🟠 Überfällig",
@@ -356,12 +456,12 @@ def generate_markdown_report(metrics, output_file="canary_health_report.md"):
 
         v_str = f"`{d.get('current_version', '-')}`"
         bat = d.get("bat_voltage")
-        bat_str = f"{round(bat, 2)}V" if bat is not None else "-"
+        bat_str = f"~{round(bat, 1)}V" if bat is not None else "-"
         sc = d.get("start_counter", "-")
-        ack_str = "✅ Vorhanden" if d.get("has_ack") else "⏳ Ausstehend"
+        ack_str = f"✅ {d.get('ack_message', 'update_ok')}" if d.get("has_ack") else "⏳ Ausstehend"
         anom_str = "; ".join(d.get("anomalies", [])) or "Keine"
 
-        lines.append(f"| `{dev_id}` | {st_icon} | {v_str} | {bat_str} | {sc} | {ack_str} | {anom_str} |")
+        lines.append(f"| `{mask_epd_id(dev_id)}` | {st_icon} | {v_str} | {bat_str} | {sc} | {ack_str} | {anom_str} |")
 
     lines.append("")
 
@@ -388,9 +488,19 @@ def generate_markdown_report(metrics, output_file="canary_health_report.md"):
 
 
 def generate_json_report(metrics, output_file="canary_health_report.json"):
-    """Speichert die maschinenlesbaren Kennzahlen in einer JSON-Datei."""
+    """Speichert die maschinenlesbaren Kennzahlen in einer JSON-Datei mit datenschutzgerechter Maskierung."""
+    sanitized_metrics = dict(metrics)
+    if "devices" in metrics:
+        sanitized_metrics["devices"] = {
+            mask_epd_id(k): {
+                **v,
+                "masked_id": mask_epd_id(k),
+                "bat_voltage": round(v["bat_voltage"], 1) if v.get("bat_voltage") is not None else None
+            }
+            for k, v in metrics["devices"].items()
+        }
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2)
+        json.dump(sanitized_metrics, f, indent=2)
     print(f"💾 Canary Health-Gate JSON gespeichert: {output_file}")
 
 
@@ -456,6 +566,8 @@ def main():
     parser.add_argument("--output-json", default="canary_health_report.json", help="Pfad zum JSON-Bericht")
     parser.add_argument("--min-adoption", type=float, default=80.0, help="Erforderliche Erfolgsquote in Prozent (Standard: 80.0)")
     parser.add_argument("--max-anomalies", type=int, default=0, help="Maximal tolerierte Anomalien (Standard: 0)")
+    parser.add_argument("--require-ack", dest="require_ack", action="store_true", default=True, help="Erfordert zwingend eine 'update_ok' Quittung in DynamoDB für das Health-Gate (Standard: True)")
+    parser.add_argument("--no-require-ack", dest="require_ack", action="store_false", help="Deaktiviert die Pflicht zur 'update_ok' Quittung")
     parser.add_argument("--watch", action="store_true", help="Kontinuierliches Polling bis Erfolgsquote erreicht ist oder Timeout")
     parser.add_argument("--interval", type=int, default=30, help="Polling-Intervall in Sekunden (Standard: 30)")
     parser.add_argument("--timeout", type=int, default=600, help="Maximales Polling-Timeout in Sekunden (Standard: 600s / 10 Min)")
@@ -487,8 +599,13 @@ def main():
         is_reset=args.reset
     )
 
-    print(f"🎯 Überwachte Zielgeräte ({len(targets)}): {', '.join(targets)}")
+    for t in targets:
+        register_github_mask(t)
+
+    ack_label = "Pflicht ('update_ok')" if args.require_ack else "Optional"
+    print(f"🎯 Überwachte Zielgeräte ({len(targets)}): {', '.join(mask_epd_id(t) for t in targets)}")
     print(f"📌 Erwartete Version: {detected_version or 'jede (automatisch)'}")
+    print(f"📋 Quittierung in DB: {ack_label}")
     print(f"📊 Schwellenwerte: Min. Adoption={args.min_adoption}%, Max. Anomalien={args.max_anomalies}\n")
 
     catalog_table = None
@@ -508,7 +625,8 @@ def main():
             targets,
             target_version=detected_version,
             start_time_ts=start_time_ts,
-            mock_items=mock_items
+            mock_items=mock_items,
+            require_ack=args.require_ack
         )
 
         generate_markdown_report(metrics, output_file=args.output_md)
@@ -520,7 +638,8 @@ def main():
         )
 
         elapsed = int(time.time() - start_time_ts)
-        print(f"⏱️ Laufzeit: {elapsed}s | Adoption: {metrics['adoption_rate_pct']}% | Anomalien: {metrics['anomalies_count']}")
+        waiting_str = f" | Warten auf update_ok: {metrics['waiting_ack_count']}" if metrics.get("waiting_ack_count", 0) > 0 else ""
+        print(f"⏱️ Laufzeit: {elapsed}s | Adoption: {metrics['adoption_rate_pct']}% (Erfolgreich: {metrics['updated_count']}/{metrics['total_targets']}{waiting_str}) | Anomalien: {metrics['anomalies_count']}")
 
         if not args.watch or is_passed:
             break
@@ -534,7 +653,7 @@ def main():
     print("=" * 65)
     if is_passed:
         print("🎉 CANARY HEALTH-GATE ERFOLGREICH BESTANDEN!")
-        print(f"   Alle {len(targets)} Pilotgeräte stabil auf Version {args.target_version}.")
+        print(f"   Alle {len(targets)} Pilotgeräte ({', '.join(mask_epd_id(t) for t in targets)}) stabil auf Version {args.target_version}.")
         print("=" * 65)
         sys.exit(0)
     else:

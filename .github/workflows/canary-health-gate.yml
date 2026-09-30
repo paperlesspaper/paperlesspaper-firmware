@@ -1,4 +1,4 @@
-name: "Canary Health Gate (Phase 3)"
+name: "Canary Health Test"
 run-name: "Canary: ${{ inputs.action }} (${{ github.ref_name }})"
 
 on:
@@ -137,6 +137,7 @@ jobs:
             --timeout 600 \
             --min-adoption 80 \
             --max-anomalies 0 \
+            --require-ack \
             --output-md canary_health_report.md \
             --output-json canary_health_report.json
 

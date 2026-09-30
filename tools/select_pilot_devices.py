@@ -38,6 +38,53 @@ except ImportError:
 
 CONFIRMATION_PHRASE = "I_CONFIRM_CANARY_OTA"
 
+_REGISTERED_MASKS = set()
+
+
+def register_github_mask(value):
+    """Registriert sensible Werte bei GitHub Actions als Secret für automatische Konsolenmaskierung."""
+    if not value or not os.environ.get("GITHUB_ACTIONS"):
+        return
+    val_str = str(value).strip()
+    if len(val_str) < 5 or val_str in _REGISTERED_MASKS:
+        return
+    if val_str.lower() in ("true", "false", "epd7", "epd13", "relay_hex", "eu-central-1", "all", "none"):
+        return
+    _REGISTERED_MASKS.add(val_str)
+    print(f"::add-mask::{val_str}")
+
+
+def mask_epd_id(uid):
+    """
+    Maskiert eine E-Paper Gerätekennung für Berichte und Protokolle.
+    Sicherheits-Garantie:
+    - Maskiert den Großteil der Seriennummer/MAC mit '***'
+    - Macht AUF JEDEN FALL die vorletzte Stelle unkenntlich (ersetzt durch '*')
+    - Verhindert Rückschlüsse auf Kunden oder Hardware-Batches
+
+    Beispiele:
+    - 'epd7-e4b0634f3354'  -> 'epd7-***3*4'  (vorletzte Stelle '5' ist unkenntlich '*')
+    - 'epd13-58e6c5c29248' -> 'epd13-***2*8' (vorletzte Stelle '4' ist unkenntlich '*')
+    - 'epd7-704988'        -> 'epd7-***9*8'  (vorletzte Stelle '8' ist unkenntlich '*')
+    - '58e6c5c29248'       -> '***2*8'
+    """
+    if not uid:
+        return ""
+    uid_str = str(uid).strip()
+    register_github_mask(uid_str)
+
+    prefix = ""
+    rest = uid_str
+    if "-" in uid_str:
+        prefix, rest = uid_str.split("-", 1)
+        prefix = f"{prefix}-"
+
+    if len(rest) <= 2:
+        return f"{prefix}***"
+    if len(rest) == 3:
+        return f"{prefix}***{rest[0]}*{rest[-1]}"
+    return f"{prefix}***{rest[-3]}*{rest[-1]}"
+
 
 def _load_env():
     possible_paths = [
@@ -284,13 +331,13 @@ def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age
         voltage = bat / 1000.0 if bat > 100 else bat
         if voltage >= 3.8:
             score += 15.0
-            notes.append(f"Akku sehr gut ({round(voltage, 2)}V)")
+            notes.append(f"Akku sehr gut (~{round(voltage, 1)}V)")
         elif voltage >= 3.6:
             score += 10.0
-            notes.append(f"Akku ausreichend ({round(voltage, 2)}V)")
+            notes.append(f"Akku ausreichend (~{round(voltage, 1)}V)")
         elif voltage < 3.4:
             score -= 25.0
-            notes.append(f"Akku schwach ({round(voltage, 2)}V)")
+            notes.append(f"Akku schwach (~{round(voltage, 1)}V)")
 
     final_score = max(0.0, min(100.0, round(score, 1)))
     return final_score, notes
@@ -366,17 +413,25 @@ def write_recommendations_markdown(results, output_file="pilot_recommendations.m
         for idx, dev in enumerate(recs, 1):
             ts_str = "-"
             if dev["last_update_ts"] > 0:
-                dt = datetime.fromtimestamp(dev["last_update_ts"], tz=timezone.utc)
-                ts_str = dt.strftime("%Y-%m-%d %H:%M")
+                age_h = (time.time() - dev["last_update_ts"]) / 3600.0
+                if age_h <= 1.0:
+                    ts_str = "Vor < 1h"
+                elif age_h <= 24.0:
+                    ts_str = f"Vor ~{int(age_h)}h"
+                elif age_h <= 168.0:
+                    ts_str = f"Vor ~{int(age_h / 24)}d"
+                else:
+                    ts_str = "> 7 Tage"
 
             bat_str = "-"
             if dev["bat_level"] is not None:
                 v = dev["bat_level"] / 1000.0 if dev["bat_level"] > 100 else dev["bat_level"]
-                bat_str = f"{round(v, 2)}V"
+                bat_str = f"~{round(v, 1)}V"
 
             notes_str = "; ".join(dev["notes"])
+            masked_id = mask_epd_id(dev["serialNumber"])
             lines.append(
-                f"| **#{idx}** | `{dev['serialNumber']}` | **{dev['score']}/100** | {dev['timeout']}s | "
+                f"| **#{idx}** | `{masked_id}` | **{dev['score']}/100** | {dev['timeout']}s | "
                 f"`{dev['fw_version']}` | {bat_str} | {ts_str} | {notes_str} |"
             )
         lines.append("")
@@ -388,33 +443,28 @@ def write_recommendations_markdown(results, output_file="pilot_recommendations.m
 
 
 def write_recommendations_json(results, output_file="pilot_recommendations.json"):
-    """Exportiert die strukturierte JSON-Empfehlungsliste für maschinelle Weiterverarbeitung."""
+    """Exportiert die strukturierte JSON-Empfehlungsliste mit datenschutzgerechter Maskierung."""
+    def _mask_entries(entries):
+        out = []
+        for d in entries:
+            v = None
+            if d.get("bat_level") is not None:
+                raw_v = d["bat_level"]
+                v = round(raw_v / 1000.0 if raw_v > 100 else raw_v, 1)
+            out.append({
+                "serialNumber": mask_epd_id(d["serialNumber"]),
+                "score": d["score"],
+                "timeout": d["timeout"],
+                "fw_version": d["fw_version"],
+                "bat_level": v,
+                "notes": d["notes"]
+            })
+        return out
+
     serializable = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "epd7": [
-            {
-                "serialNumber": d["serialNumber"],
-                "score": d["score"],
-                "timeout": d["timeout"],
-                "fw_version": d["fw_version"],
-                "bat_level": d["bat_level"],
-                "last_update_ts": d["last_update_ts"],
-                "notes": d["notes"]
-            }
-            for d in results["epd7"]["recommendations"]
-        ],
-        "epd13": [
-            {
-                "serialNumber": d["serialNumber"],
-                "score": d["score"],
-                "timeout": d["timeout"],
-                "fw_version": d["fw_version"],
-                "bat_level": d["bat_level"],
-                "last_update_ts": d["last_update_ts"],
-                "notes": d["notes"]
-            }
-            for d in results["epd13"]["recommendations"]
-        ]
+        "epd7": _mask_entries(results["epd7"]["recommendations"]),
+        "epd13": _mask_entries(results["epd13"]["recommendations"])
     }
 
     with open(output_file, "w", encoding="utf-8") as f:
@@ -423,13 +473,19 @@ def write_recommendations_json(results, output_file="pilot_recommendations.json"
 
 
 def write_template_target_file(results, template_file="canary_target_devices.json.template"):
-    """Erzeugt eine beispielhafte Target-Datei zur einfachen Bearbeitung durch den Nutzer."""
+    """Erzeugt eine beispielhafte Target-Vorlage mit Platzhaltern (schützt Kunden-Seriennummern)."""
     template_data = {
         "description": "Vom Nutzer manuell freigegebene Zielgeräte für das Canary Pre-Release",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "candidate_version": "b3.0.X",
-        "devices": [d["serialNumber"] for d in results["epd7"]["recommendations"][:5]] +
-                   [d["serialNumber"] for d in results["epd13"]["recommendations"][:5]]
+        "devices": [
+            "epd7-XX",
+            "epd7-XX",
+            "epd7-XX",
+            "epd13-XX",
+            "epd13-XX",
+            "epd13-XX"
+        ]
     }
     with open(template_file, "w", encoding="utf-8") as f:
         json.dump(template_data, f, indent=2)
@@ -464,6 +520,7 @@ def apply_ota_to_selected_devices(target_devices, ota_url, dry_run=True, confirm
 
     for idx, dev_id in enumerate(target_devices, 1):
         thing_name = dev_id.strip()
+        register_github_mask(thing_name)
         dev_ota_url = ota_url
         if "{target}" in dev_ota_url:
             model = "epd13" if "13" in thing_name.lower() else "epd7"
@@ -483,11 +540,11 @@ def apply_ota_to_selected_devices(target_devices, ota_url, dry_run=True, confirm
         payload_bytes = json.dumps(shadow_payload).encode("utf-8")
 
         if dry_run:
-            print(f" [DRY-RUN] #{idx}: Würde Shadow 'settings.otaUrl' für '{thing_name}' setzen:")
+            print(f" [DRY-RUN] #{idx}: Würde Shadow 'settings.otaUrl' für '{mask_epd_id(thing_name)}' setzen:")
             print(f"            Payload: {shadow_payload}")
         else:
             try:
-                print(f" [APPLY] #{idx}: Setze Shadow 'settings.otaUrl' für '{thing_name}'...")
+                print(f" [APPLY] #{idx}: Setze Shadow 'settings.otaUrl' für '{mask_epd_id(thing_name)}'...")
                 iot_client.update_thing_shadow(
                     thingName=thing_name,
                     shadowName="settings",
@@ -495,7 +552,7 @@ def apply_ota_to_selected_devices(target_devices, ota_url, dry_run=True, confirm
                 )
                 print(f"   ✅ Erfolgreich aktualisiert.")
             except ClientError as e:
-                print(f"   ❌ Fehler beim Aktualisieren von Shadow für '{thing_name}': {e}")
+                print(f"   ❌ Fehler beim Aktualisieren von Shadow für '{mask_epd_id(thing_name)}': {e}")
 
 
 def resolve_main_ota_url(s3_bucket=None):
@@ -536,6 +593,7 @@ def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="
 
     for idx, dev_id in enumerate(target_devices, 1):
         thing_name = dev_id.strip()
+        register_github_mask(thing_name)
         model = "epd13" if "13" in thing_name.lower() else "epd7"
         dev_main_url = main_url
         if "{target}" in dev_main_url:
@@ -555,11 +613,11 @@ def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="
         payload_bytes = json.dumps(shadow_payload).encode("utf-8")
 
         if dry_run:
-            print(f" [DRY-RUN] #{idx}: Würde Shadow 'settings.otaUrl' für '{thing_name}' auf Hauptversion setzen:")
+            print(f" [DRY-RUN] #{idx}: Würde Shadow 'settings.otaUrl' für '{mask_epd_id(thing_name)}' auf Hauptversion setzen:")
             print(f"            Payload: {shadow_payload}")
         else:
             try:
-                print(f" [RESET] #{idx}: Setze Shadow 'settings.otaUrl' für '{thing_name}' auf Hauptversion ({dev_main_url})...")
+                print(f" [RESET] #{idx}: Setze Shadow 'settings.otaUrl' für '{mask_epd_id(thing_name)}' auf Hauptversion ({dev_main_url})...")
                 iot_client.update_thing_shadow(
                     thingName=thing_name,
                     shadowName="settings",
@@ -567,14 +625,14 @@ def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="
                 )
                 print("   ✅ Shadow erfolgreich auf Hauptversion gesetzt.")
             except ClientError as e:
-                print(f"   ❌ Fehler beim Setzen von Shadow für '{thing_name}': {e}")
+                print(f"   ❌ Fehler beim Setzen von Shadow für '{mask_epd_id(thing_name)}': {e}")
 
             # Optional MQTT-Push zur sofortigen Signalisierung
             try:
                 mqtt_topic = f"$aws/things/{thing_name}/epaper/receive"
                 mqtt_msg = json.dumps({"ota": dev_main_url})
                 iot_client.publish(topic=mqtt_topic, qos=1, payload=mqtt_msg.encode("utf-8"))
-                print(f"   📡 MQTT Trigger an '{mqtt_topic}' gesendet.")
+                print(f"   📡 MQTT Trigger an '$aws/things/{mask_epd_id(thing_name)}/epaper/receive' gesendet.")
             except Exception:
                 pass
 

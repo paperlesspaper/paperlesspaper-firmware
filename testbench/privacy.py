@@ -42,24 +42,34 @@ def register_github_mask(value):
 
 def mask_uid(uid):
     """
-    Maskiert eine E-Paper Display UID:
-    - 'epd7-dc1ed57e3334'  -> 'epd7-***3334'
-    - 'epd13-test001'      -> 'epd13-***t001'
-    - 'DC1ED57E3334'       -> '***3334'
+    Maskiert eine E-Paper Display UID / Seriennummer / Thing-ID:
+    Macht zwingend die vorletzte Stelle unkenntlich ('*') und verbirgt den Großteil des Identifiers ('***').
+    - 'epd7-e4b0634f3354'  -> 'epd7-***3*4'
+    - 'epd13-58e6c5c29248' -> 'epd13-***2*8'
+    - 'epd7-704988'        -> 'epd7-***9*8'
+    - '58e6c5c29248'       -> '***2*8'
     """
     if not uid:
         return ""
     uid_str = str(uid).strip()
     register_github_mask(uid_str)
 
+    prefix = ""
+    rest = uid_str
     if "-" in uid_str:
         prefix, rest = uid_str.split("-", 1)
-        if len(rest) > 4:
-            return f"{prefix}-***{rest[-4:]}"
-        return f"{prefix}-***"
-    if len(uid_str) > 6:
-        return f"***{uid_str[-4:]}"
-    return "***"
+        prefix = f"{prefix}-"
+
+    if len(rest) <= 2:
+        return f"{prefix}***"
+
+    if len(rest) == 3:
+        return f"{prefix}***{rest[0]}*{rest[-1]}"
+
+    return f"{prefix}***{rest[-3]}*{rest[-1]}"
+
+
+mask_epd_id = mask_uid
 
 
 def mask_mac(mac):
@@ -154,10 +164,18 @@ def sanitize_log_line(line):
         return ""
     res = str(line)
 
-    # EPD UIDs (z. B. epd7-dc1ed57e3334)
+    # EPD UIDs (z. B. epd7-dc1ed57e3334 -> epd7-***3*4)
+    def _sub_epd_uid(m):
+        full = m.group(0)
+        prefix = m.group(1)
+        rest = full[len(prefix):]
+        if len(rest) >= 4:
+            return f"{prefix}***{rest[-3]}*{rest[-1]}"
+        return f"{prefix}***"
+
     res = re.sub(
-        r"\b(epd(?:7|13)-)[0-9a-fA-F]{4,}([0-9a-fA-F]{4})\b",
-        r"\1***\2",
+        r"\b(epd(?:7|13)-)[0-9a-fA-F]{3,}\b",
+        _sub_epd_uid,
         res
     )
 
