@@ -1657,10 +1657,20 @@ bool awsConnect(bool connect) {
    counter = 0;
    while (!client.connect(CLIENT_ID)) {
       counter++;
-      Serial.print("*");
+      char tlsErrBuf[128] = {0};
+      int tlsErr = net.lastError(tlsErrBuf, sizeof(tlsErrBuf));
+      int mqttErr = (int)client.lastError();
+      int retCode = (int)client.returnCode();
+      if (tlsErr != 0 || mqttErr != 0 || retCode != 0) {
+         Serial.printf("[AWS] connect retry %d failed (mqttErr: %d, retCode: %d, tlsErr: %d '%s')\n",
+                       counter, mqttErr, retCode, tlsErr, tlsErrBuf);
+      } else {
+         Serial.printf("[AWS] connect retry %d failed (unknown error)\n", counter);
+      }
       client.loop();
       delay(300);
       if (counter > 20) {
+         Serial.println("[AWS] Connection FAILED (max retries reached)");
          return false;
       }
    }
