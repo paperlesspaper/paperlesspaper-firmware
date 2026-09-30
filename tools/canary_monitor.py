@@ -37,6 +37,54 @@ except ImportError:
     ClientError = Exception
 
 
+_REGISTERED_MASKS = set()
+
+
+def register_github_mask(value):
+    """Registriert sensible Werte bei GitHub Actions als Secret für automatische Konsolenmaskierung."""
+    if not value or not os.environ.get("GITHUB_ACTIONS"):
+        return
+    val_str = str(value).strip()
+    if len(val_str) < 5 or val_str in _REGISTERED_MASKS:
+        return
+    if val_str.lower() in ("true", "false", "epd7", "epd13", "relay_hex", "eu-central-1", "all", "none"):
+        return
+    _REGISTERED_MASKS.add(val_str)
+    print(f"::add-mask::{val_str}")
+
+
+def mask_epd_id(uid):
+    """
+    Maskiert eine E-Paper Gerätekennung für Berichte und Protokolle.
+    Sicherheits-Garantie:
+    - Maskiert den Großteil der Seriennummer/MAC mit '***'
+    - Macht AUF JEDEN FALL die vorletzte Stelle unkenntlich (ersetzt durch '*')
+    - Verhindert Rückschlüsse auf Kunden oder Hardware-Batches
+
+    Beispiele:
+    - 'epd7-e4b0634f3354'  -> 'epd7-***3*4'  (vorletzte Stelle '5' ist unkenntlich '*')
+    - 'epd13-58e6c5c29248' -> 'epd13-***2*8' (vorletzte Stelle '4' ist unkenntlich '*')
+    - 'epd7-704988'        -> 'epd7-***9*8'  (vorletzte Stelle '8' ist unkenntlich '*')
+    - '58e6c5c29248'       -> '***2*8'
+    """
+    if not uid:
+        return ""
+    uid_str = str(uid).strip()
+    register_github_mask(uid_str)
+
+    prefix = ""
+    rest = uid_str
+    if "-" in uid_str:
+        prefix, rest = uid_str.split("-", 1)
+        prefix = f"{prefix}-"
+
+    if len(rest) <= 2:
+        return f"{prefix}***"
+    if len(rest) == 3:
+        return f"{prefix}***{rest[0]}*{rest[-1]}"
+    return f"{prefix}***{rest[-3]}*{rest[-1]}"
+
+
 def _load_env():
     possible_paths = [
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
@@ -408,12 +456,12 @@ def generate_markdown_report(metrics, output_file="canary_health_report.md"):
 
         v_str = f"`{d.get('current_version', '-')}`"
         bat = d.get("bat_voltage")
-        bat_str = f"{round(bat, 2)}V" if bat is not None else "-"
+        bat_str = f"~{round(bat, 1)}V" if bat is not None else "-"
         sc = d.get("start_counter", "-")
         ack_str = f"✅ {d.get('ack_message', 'update_ok')}" if d.get("has_ack") else "⏳ Ausstehend"
         anom_str = "; ".join(d.get("anomalies", [])) or "Keine"
 
-        lines.append(f"| `{dev_id}` | {st_icon} | {v_str} | {bat_str} | {sc} | {ack_str} | {anom_str} |")
+        lines.append(f"| `{mask_epd_id(dev_id)}` | {st_icon} | {v_str} | {bat_str} | {sc} | {ack_str} | {anom_str} |")
 
     lines.append("")
 
@@ -440,9 +488,19 @@ def generate_markdown_report(metrics, output_file="canary_health_report.md"):
 
 
 def generate_json_report(metrics, output_file="canary_health_report.json"):
-    """Speichert die maschinenlesbaren Kennzahlen in einer JSON-Datei."""
+    """Speichert die maschinenlesbaren Kennzahlen in einer JSON-Datei mit datenschutzgerechter Maskierung."""
+    sanitized_metrics = dict(metrics)
+    if "devices" in metrics:
+        sanitized_metrics["devices"] = {
+            mask_epd_id(k): {
+                **v,
+                "masked_id": mask_epd_id(k),
+                "bat_voltage": round(v["bat_voltage"], 1) if v.get("bat_voltage") is not None else None
+            }
+            for k, v in metrics["devices"].items()
+        }
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(metrics, f, indent=2)
+        json.dump(sanitized_metrics, f, indent=2)
     print(f"💾 Canary Health-Gate JSON gespeichert: {output_file}")
 
 
@@ -541,8 +599,11 @@ def main():
         is_reset=args.reset
     )
 
+    for t in targets:
+        register_github_mask(t)
+
     ack_label = "Pflicht ('update_ok')" if args.require_ack else "Optional"
-    print(f"🎯 Überwachte Zielgeräte ({len(targets)}): {', '.join(targets)}")
+    print(f"🎯 Überwachte Zielgeräte ({len(targets)}): {', '.join(mask_epd_id(t) for t in targets)}")
     print(f"📌 Erwartete Version: {detected_version or 'jede (automatisch)'}")
     print(f"📋 Quittierung in DB: {ack_label}")
     print(f"📊 Schwellenwerte: Min. Adoption={args.min_adoption}%, Max. Anomalien={args.max_anomalies}\n")
@@ -592,7 +653,7 @@ def main():
     print("=" * 65)
     if is_passed:
         print("🎉 CANARY HEALTH-GATE ERFOLGREICH BESTANDEN!")
-        print(f"   Alle {len(targets)} Pilotgeräte stabil auf Version {args.target_version}.")
+        print(f"   Alle {len(targets)} Pilotgeräte ({', '.join(mask_epd_id(t) for t in targets)}) stabil auf Version {args.target_version}.")
         print("=" * 65)
         sys.exit(0)
     else:
