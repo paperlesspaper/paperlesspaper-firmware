@@ -61,13 +61,28 @@ class ESP32HardwareController:
                     return self.current_version
         return None
 
-    def connect(self):
+    def connect(self, retries=12, retry_delay=0.5):
         """Öffnet die serielle Schnittstelle und startet den Hintergrund-Reader."""
         if serial is None:
             raise RuntimeError("Das Modul 'pyserial' ist nicht installiert. Bitte 'pip install pyserial' ausführen.")
 
+        # Falls bereits sauber geöffnet und aktiv, nichts tun
+        if self._running and self.ser and self.ser.is_open:
+            return
+
+        # Vorherigen Reader-Thread sauber beenden falls vorhanden
+        if self._running:
+            self._running = False
+            if self._thread and self._thread.is_alive():
+                self._thread.join(timeout=1.0)
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+
         last_err = None
-        for attempt in range(1, 4):
+        for attempt in range(1, retries + 1):
             try:
                 self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
                 self._running = True
@@ -77,8 +92,8 @@ class ESP32HardwareController:
                 return
             except Exception as e:
                 last_err = e
-                if attempt < 3:
-                    time.sleep(0.5)
+                if attempt < retries:
+                    time.sleep(retry_delay)
 
         raise ConnectionError(f"[{self.name}] Konnte nicht mit {self.port} verbinden: {last_err}")
 
@@ -255,10 +270,14 @@ class ESP32HardwareController:
                     f"[{self.name}] Kein Relais-Port für den Power-Cycle konfiguriert oder zugeordnet!"
                 )
 
-            # VOR dem Relais-Puls sicherstellen, dass der serielle Port offen ist,
-            # damit sofort ab der ersten Millisekunde nach dem Booten alle Logs empfangen werden.
-            if not (self._running and self.ser and self.ser.is_open):
-                self.connect()
+            # VOR dem Relais-Puls versuchen, den Port offen zu haben (falls das Gerät bereits bestromt ist).
+            # Falls das Gerät aktuell stromlos ist oder schläft, nicht abbrechen – der Relais-Puls
+            # stellt die Stromversorgung ja erst wieder her!
+            try:
+                if not (self._running and self.ser and self.ser.is_open):
+                    self.connect(retries=3, retry_delay=0.3)
+            except Exception:
+                pass
 
             if self.ser and self.ser.is_open:
                 try:
@@ -268,9 +287,20 @@ class ESP32HardwareController:
             self.clear_logs()
 
             off_dur = 1.5 if "13" in str(self.name) else 1.0
-            print(f"⚡ [{self.name}] Schalte USB-Relais an Port {target_relay} (Port {self.port} bleibt dauerhaft offen)...")
+            print(f"⚡ [{self.name}] Schalte USB-Relais an Port {target_relay}...")
             self.pulse_relay(target_relay, off_duration=off_dur, name=self.name)
-            time.sleep(0.3)
+            time.sleep(0.5)
+
+            # NACH dem Relais-Puls: Sicherstellen, dass die serielle Verbindung wieder steht
+            # (Windows benötigt nach Power-Cycle kurz für die USB-Re-Enumeration).
+            if not (self._running and self.ser and self.ser.is_open):
+                self.connect(retries=12, retry_delay=0.5)
+
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.reset_input_buffer()
+                except Exception:
+                    pass
 
             print(f"✅ [{self.name}] USB-Relais Power-Cycle erfolgreich.")
 
