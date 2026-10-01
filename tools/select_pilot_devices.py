@@ -63,9 +63,9 @@ def mask_epd_id(uid):
     - Verhindert Rückschlüsse auf Kunden oder Hardware-Batches
 
     Beispiele:
-    - 'epd7-e4b0634f3354'  -> 'epd7-***3*4'  (vorletzte Stelle '5' ist unkenntlich '*')
-    - 'epd13-58e6c5c29248' -> 'epd13-***2*8' (vorletzte Stelle '4' ist unkenntlich '*')
-    - 'epd7-704988'        -> 'epd7-***9*8'  (vorletzte Stelle '8' ist unkenntlich '*')
+    - 'epd7-jidf3d4'  -> 'epd7-***3*4'  
+    - 'epd13-ksdfj92d8' -> 'epd13-***2*8' 
+    - 'epd7-704988'        -> 'epd7-***9*8'  
     - '58e6c5c29248'       -> '***2*8'
     """
     if not uid:
@@ -260,10 +260,11 @@ def parse_device_metrics(item):
     }
 
 
-def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age_days=7):
+def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age_days=7, max_age_hours=1.0):
     """
     Berechnet einen Eignungs-Score (0 bis 100) für Canary-Updates:
     - Nur aktive Geräte erhalten Punkte.
+    - Nur Geräte, die vor weniger als max_age_hours online waren (Standard: 1.0h).
     - Timeout 60s (hohe Frequenz): +40 Pkt, Timeout 180s: +30 Pkt.
     - Kürzliche Aktivität: Je neuer, desto höher (bis zu +30 Pkt).
     - Niedriger StartCounter (<= 1): +15 Pkt, (== 2): +5 Pkt, (>= 3): -30 Pkt (Crash-Loop-Gefahr!).
@@ -271,6 +272,13 @@ def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age
     """
     if not device_info["active"]:
         return 0.0, ["Gerät ist nicht aktiv/aktiviert"]
+
+    now = time.time()
+    age_sec = now - device_info["last_update_ts"] if device_info["last_update_ts"] > 0 else 99999999
+    age_hours = age_sec / 3600.0
+
+    if max_age_hours is not None and max_age_hours > 0 and age_hours > max_age_hours:
+        return 0.0, [f"Zu lange inaktiv (vor > {max_age_hours}h online)"]
 
     notes = []
     score = 0.0
@@ -292,10 +300,6 @@ def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age
         notes.append(f"Ungewöhnliches Intervall ({timeout}s)")
 
     # 2. Aktualität (lastUpdateTime)
-    now = time.time()
-    age_sec = now - device_info["last_update_ts"] if device_info["last_update_ts"] > 0 else 99999999
-    age_hours = age_sec / 3600.0
-
     if age_hours <= 1.0:
         score += 30.0
         notes.append("Vor < 1h online")
@@ -343,40 +347,67 @@ def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age
     return final_score, notes
 
 
-def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180)):
+def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180), max_age_hours=1.0):
     """
     Filtert und bewertet alle gescannten Geräte und liefert je Modell
     (EPD7 und EPD13) eine Liste der am besten geeigneten Kandidaten.
+    Wählt für Empfehlungen ausschließlich Geräte aus, die vor weniger als max_age_hours (Standard: 1.0h)
+    zuletzt online waren.
     """
     epd7_candidates = []
     epd13_candidates = []
+    now = time.time()
 
     for dev in devices:
         parsed = parse_device_metrics(dev)
-        score, notes = calculate_suitability_score(parsed, allowed_timeouts=allowed_timeouts)
+        score, notes = calculate_suitability_score(
+            parsed,
+            allowed_timeouts=allowed_timeouts,
+            max_age_hours=max_age_hours
+        )
         parsed["score"] = score
         parsed["notes"] = notes
+        parsed["age_hours"] = (now - parsed["last_update_ts"]) / 3600.0 if parsed["last_update_ts"] > 0 else 99999999
 
         if parsed["model"] == "EPD7":
             epd7_candidates.append(parsed)
         elif parsed["model"] == "EPD13":
             epd13_candidates.append(parsed)
 
-    # Nach Score absteigend sortieren
-    epd7_candidates.sort(key=lambda x: (x["score"], x["last_update_ts"]), reverse=True)
-    epd13_candidates.sort(key=lambda x: (x["score"], x["last_update_ts"]), reverse=True)
+    # Nur aktive Geräte mit Score > 0 und Aktivität vor < max_age_hours für Empfehlungen zulassen
+    def _is_eligible(d):
+        if not d.get("active") or d.get("score", 0) <= 0:
+            return False
+        if max_age_hours is not None and max_age_hours > 0:
+            return d.get("age_hours", 99999) <= max_age_hours
+        return True
 
-    recommended_epd7 = epd7_candidates[:target_count]
-    recommended_epd13 = epd13_candidates[:target_count]
+    eligible_epd7 = [d for d in epd7_candidates if _is_eligible(d)]
+    eligible_epd13 = [d for d in epd13_candidates if _is_eligible(d)]
+
+    # Nach Score absteigend sortieren, bei Punktgleichheit nach kürzestem Timeout (z. B. 60s vor 180s)
+    # und anschließend nach neuester Aktivität
+    def _sort_key(d):
+        t = d.get("timeout")
+        timeout_prio = -t if (t is not None and t > 0) else -999999
+        return (d["score"], timeout_prio, d["last_update_ts"])
+
+    eligible_epd7.sort(key=_sort_key, reverse=True)
+    eligible_epd13.sort(key=_sort_key, reverse=True)
+
+    recommended_epd7 = eligible_epd7[:target_count]
+    recommended_epd13 = eligible_epd13[:target_count]
 
     return {
         "epd7": {
-            "total_found": len(epd7_candidates),
+            "total_found": len(eligible_epd7),
+            "total_catalog": len(epd7_candidates),
             "recommendations": recommended_epd7,
             "all_scored": epd7_candidates
         },
         "epd13": {
-            "total_found": len(epd13_candidates),
+            "total_found": len(eligible_epd13),
+            "total_catalog": len(epd13_candidates),
             "recommendations": recommended_epd13,
             "all_scored": epd13_candidates
         }
@@ -400,7 +431,7 @@ def write_recommendations_markdown(results, output_file="pilot_recommendations.m
         data = results[model_key]
         recs = data["recommendations"]
         lines.append(f"## {title}")
-        lines.append(f"*Gefundene Kandidaten: {data['total_found']} | Empfohlene Top-Auswahl: {len(recs)}*")
+        lines.append(f"*Gefundene Kandidaten (vor < 1h online): {data['total_found']} | Empfohlene Top-Auswahl: {len(recs)}*")
         lines.append("")
 
         if not recs:
@@ -473,10 +504,13 @@ def write_recommendations_json(results, output_file="pilot_recommendations.json"
 
 
 def write_template_target_file(results, template_file="canary_target_devices.json.template"):
-    """Erzeugt eine beispielhafte Target-Vorlage mit Platzhaltern (schützt Kunden-Seriennummern)."""
+    """Erzeugt eine beispielhafte Target-Vorlage mit Platzhaltern (schützt Kunden-Seriennummern), falls nicht vorhanden."""
+    if os.path.exists(template_file):
+        return
+
     template_data = {
         "description": "Vom Nutzer manuell freigegebene Zielgeräte für das Canary Pre-Release",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": "2026-01-01T00:00:00+00:00",
         "candidate_version": "b3.0.X",
         "devices": [
             "epd7-XX",
@@ -490,6 +524,59 @@ def write_template_target_file(results, template_file="canary_target_devices.jso
     with open(template_file, "w", encoding="utf-8") as f:
         json.dump(template_data, f, indent=2)
     print(f"📝 Vorlage für Zielgeräte erstellt: {template_file}")
+
+
+def print_copy_paste_recommendations(results):
+    """
+    Gibt die empfohlenen Pilotgeräte als kommagetrennte Liste und fertige CLI-Befehle
+    im Terminal aus, damit sie direkt für Canary-Monitor oder Rollout kopiert werden können.
+    """
+    epd7_ids = [d["serialNumber"] for d in results.get("epd7", {}).get("recommendations", [])]
+    epd13_ids = [d["serialNumber"] for d in results.get("epd13", {}).get("recommendations", [])]
+    all_ids = epd7_ids + epd13_ids
+
+    for dev_id in all_ids:
+        register_github_mask(dev_id)
+
+    if not all_ids:
+        print("\nℹ️ Keine geeigneten Pilotgeräte für Copy & Paste gefunden.")
+        return
+
+    all_ids_str = ",".join(all_ids)
+    epd7_str = ",".join(epd7_ids)
+    epd13_str = ",".join(epd13_ids)
+
+    print("\n" + "=" * 65, flush=True)
+    print("📋 COPY & PASTE FÜR CANARY MONITOR & ROLLOUT", flush=True)
+    print("=" * 65, flush=True)
+    print(f"🎯 Alle empfohlenen Pilotgeräte ({len(all_ids)}):", flush=True)
+    print(f'"{all_ids_str}"', flush=True)
+
+    if epd7_ids:
+        print(f"\n  📺 Nur EPD7 ({len(epd7_ids)}):", flush=True)
+        print(f'  "{epd7_str}"', flush=True)
+
+    if epd13_ids:
+        print(f"\n  📺 Nur EPD13 ({len(epd13_ids)}):", flush=True)
+        print(f'  "{epd13_str}"', flush=True)
+
+    print("\n💡 Fertige CLI-Befehle zum direkten Ausführen:", flush=True)
+    print("▶ Canary Health-Gate Überwachung starten (Alle):", flush=True)
+    print(f'  python tools/canary_monitor.py --device-ids "{all_ids_str}" --watch', flush=True)
+
+    if epd7_str:
+        print("\n▶ Canary Health-Gate Überwachung (Nur EPD7):", flush=True)
+        print(f'  python tools/canary_monitor.py --device-ids "{epd7_str}" --watch', flush=True)
+
+    if epd13_str:
+        print("\n▶ Canary Health-Gate Überwachung (Nur EPD13):", flush=True)
+        print(f'  python tools/canary_monitor.py --device-ids "{epd13_str}" --watch', flush=True)
+
+    print("\n▶ Canary Rollout ausführen (Trockenlauf / Dry-Run):", flush=True)
+    print(f'  python tools/select_pilot_devices.py --device-ids "{all_ids_str}"', flush=True)
+    print("\n▶ Canary Rollout ausführen (Echt / Apply):", flush=True)
+    print(f'  python tools/select_pilot_devices.py --device-ids "{all_ids_str}" --apply --confirm-ota {CONFIRMATION_PHRASE}', flush=True)
+    print("=" * 65 + "\n", flush=True)
 
 
 def apply_ota_to_selected_devices(target_devices, ota_url, dry_run=True, confirm_token="", region=None):
@@ -669,6 +756,7 @@ def main():
     parser.add_argument("--reset", action="store_true", help="Setzt Zielgeräte auf die reguläre Hauptfirmware (main/production) zurück")
     parser.add_argument("--recommend", action="store_true", help="Führt den Flottenscan zur Ermittlung von Pilotgeräten aus")
     parser.add_argument("--confirm-ota", default="", help=f"Sicherheits-Bestätigungstoken: '{CONFIRMATION_PHRASE}'")
+    parser.add_argument("--max-age-hours", type=float, default=1.0, help="Maximales Alter des letzten Kontakts in Stunden für Empfehlungen (Standard: 1.0 = vor < 1h)")
     parser.add_argument("--mock-file", help="Pfad zu einer JSON-Datei mit Test-Geräten (für Offline-/Testbench-Betrieb ohne AWS)")
     args = parser.parse_args()
 
@@ -755,15 +843,22 @@ def main():
     else:
         devices = scan_all_epaper_devices(table_name=args.table, region=args.region)
 
-    results = generate_recommendations(devices, target_count=args.count, allowed_timeouts=allowed_timeouts)
+    results = generate_recommendations(
+        devices,
+        target_count=args.count,
+        allowed_timeouts=allowed_timeouts,
+        max_age_hours=args.max_age_hours
+    )
 
-    print(f"📊 Auswertungsergebnis:")
+    age_crit_str = f"vor < {args.max_age_hours}h online" if args.max_age_hours and args.max_age_hours > 0 else "alle"
+    print(f"📊 Auswertungsergebnis (Kriterien: aktiv & {age_crit_str}):")
     print(f"   - EPD7  Kandidaten im Katalog: {results['epd7']['total_found']} (Top {len(results['epd7']['recommendations'])} empfohlen)")
     print(f"   - EPD13 Kandidaten im Katalog: {results['epd13']['total_found']} (Top {len(results['epd13']['recommendations'])} empfohlen)")
 
     write_recommendations_markdown(results, output_file=args.output_md)
     write_recommendations_json(results, output_file=args.output_json)
     write_template_target_file(results, template_file="canary_target_devices.json.template")
+    print_copy_paste_recommendations(results)
 
 
 if __name__ == "__main__":
