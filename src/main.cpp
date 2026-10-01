@@ -178,7 +178,7 @@ SystemData systemData = {
 
 esp_sleep_wakeup_cause_t wakeup_reason;
 KXTJ3 myIMU(ACC_ADDR);  // Address can be 0x0E or 0x0F
-esp32FOTA myEsp32FOTA("esp32-fota-http", SOFTWARE_VERSION);
+esp32FOTA myEsp32FOTA("esp32-fota-http", SOFTWARE_VERSION, false, true);
 WiFiClientSecure net = WiFiClientSecure();
 MQTTClient client(512);  // Buffer to 256 Byte
 Preferences preferences;
@@ -318,14 +318,12 @@ void iotReceiveHandler(String& topic, String& payload) {
       Serial.printf("[AWS RX] OTA URL received: '%s' (%d) \n", otaUrlTemp, otaUrlLength);
       if (otaUrlLength > 5) {
          displaySetQuickRefresh(true);
-         waitDisplayComplete(false);
-         delay(200);
-         displaySetText("Updating Software...", true, true);
          ledBlink(2000, true);
          Serial.println("[OTA] OTA via MQTT Started.....");
          writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
          resetAll(false, false);
-
+         waitDisplayComplete(false);
+         powerSupplyDisplay(false);
          if (strstr(otaUrlTemp, ".json") != nullptr) {
             Serial.println("[OTA] Processing Manifest JSON...");
             myEsp32FOTA.setManifestURL(otaUrlTemp);
@@ -2946,10 +2944,14 @@ void setup() {
       displaySetText("DEV OTA Update...", true, true);
       ledBlink(2000, true, LED_DIM_VALUE);
       Serial.println("[OTA] Dev OTA Started.....");
-      tickerFailsave.detach();
       writeIntToFlash(0, 170);
       resetAll(false, false);
-      myEsp32FOTA.execOTA();
+      waitDisplayComplete(false);
+      powerSupplyDisplay(false);
+      bool ok = myEsp32FOTA.execOTA();
+      if (!ok) {
+         Serial.println("[OTA] ERROR: Boot execOTA failed!");
+      }
       delay(2000);
    }
 #else
@@ -2963,10 +2965,14 @@ void setup() {
       displayOtaScreen();
       ledBlink(2000, true, LED_DIM_VALUE);
       Serial.println("[OTA] OTA Started.....");
-      tickerFailsave.detach();
       writeIntToFlash(0, 170);  // Reset activation counter in case activation is in ota proccess
       resetAll(false, false);
-      myEsp32FOTA.execOTA();
+      waitDisplayComplete(false);
+      powerSupplyDisplay(false);
+      bool ok = myEsp32FOTA.execOTA();
+      if (!ok) {
+         Serial.println("[OTA] ERROR: Boot execOTA failed!");
+      }
       delay(2000);
    } else {
       Serial.println("[OTA] no OTA needed");

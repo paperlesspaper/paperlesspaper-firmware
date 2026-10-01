@@ -64,7 +64,7 @@ Verwaltet das gezielte Rollout von Pre-Release Firmware auf Pilotgeräte über A
   - Feature-/Dev-Branches: `http://<bucket>/espfota_{target}_dev.json`
 - **Canary Deploy:** Schreibt die FOTA-URL in den AWS IoT Named Shadow `settings.otaUrl` der Zielgeräte.
 - **Rollback / Reset:** Setzt Zielgeräte auf die reguläre Hauptfirmware (`espfota_{target}.json`) zurück.
-- **Flottenscan (`--recommend`):** Durchsucht DynamoDB `iotCatalog` nach geeigneten Pilotgeräten (Filter nach EPD7/EPD13, Wakeup-Intervallen 60/180s, Akkustand > 50%, `StartCounter == 0`).
+- **Flottenscan (`--recommend`):** Durchsucht DynamoDB `iotCatalog` nach geeigneten Pilotgeräten (Filter nach EPD7/EPD13, Wakeup-Intervallen 60/180s, vor < 1h online, Akkustand, StartCounter).
 
 ### Wichtigste Optionen
 - `--device-ids <liste>`: Kommagetrennte Geräte-IDs (z. B. `"epd7-001,epd13-002"`).
@@ -73,6 +73,7 @@ Verwaltet das gezielte Rollout von Pre-Release Firmware auf Pilotgeräte über A
 - `--confirm-ota <token>`: Bestätigungs-Token (`I_CONFIRM_CANARY_OTA`).
 - `--reset`: Setzt Geräte auf die Hauptfirmware zurück.
 - `--recommend`: Führt Flottenscan aus und generiert Empfehlungslisten (`pilot_recommendations.md`).
+- `--max-age-hours <stunden>`: Maximales Alter des letzten Kontakts für Empfehlungen (Standard: `1.0` = vor weniger als 1h).
 
 ### Nutzung
 ```bash
