@@ -2549,6 +2549,20 @@ int accInit(bool skipInit) {
       acc_z = round((int)(acc_z_loc * 10));
    }
 
+#ifdef EPD_TYPE_13INCH
+   if (acc_y > 5 && acc_x < 5 && acc_x > -5) {
+      orientation = 0;
+   }
+   if (acc_x < -5 && acc_y < 5 && acc_y > -5) {
+      orientation = 1;
+   }
+   if (acc_y < -5 && acc_x < 5 && acc_x > -5) {
+      orientation = 2;
+   }
+   if (acc_x > 5 && acc_y < 5 && acc_y > -5) {
+      orientation = 3;
+   }
+#else
    if (acc_x > 5 && acc_y < 5 && acc_y > -5) {
       orientation = 0;
    }
@@ -2561,6 +2575,7 @@ int accInit(bool skipInit) {
    if (acc_x < 5 && acc_x > -5 && acc_y < -5) {
       orientation = 3;
    }
+#endif
 
    if (DEBUG_FLAG && !skipInit) Serial.printf("[ACC] Values: X:%d Y:%d Z:%d Orient: %d \n", acc_x, acc_y, acc_z, orientation);
 
@@ -2586,11 +2601,19 @@ bool accIntSet(int sensity) {
 
 void accUpdateOrient() {
    systemData.deviceOrientation = accInit();
+#ifdef EPD_TYPE_13INCH
+   if (systemData.deviceOrientation == 1 || systemData.deviceOrientation == 2) {
+      displaySetRotation(1);
+   } else {
+      displaySetRotation(0);
+   }
+#else
    if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
       displaySetRotation(1);
    } else {
       displaySetRotation(0);
    }
+#endif
    return;
 }
 
@@ -2603,11 +2626,19 @@ void recheckAccOrient(int setOrientValue) {
       Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
       writeIntToFlash(systemData.deviceOrientation, 220);
       // writeIntToFlash(0, 150);  // Reset picture version after ota to init update
+#ifdef EPD_TYPE_13INCH
+      if (systemData.deviceOrientation == 1 || systemData.deviceOrientation == 2) {
+         displaySetRotation(1);
+      } else {
+         displaySetRotation(0);
+      }
+#else
       if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
          displaySetRotation(1);
       } else {
          displaySetRotation(0);
       }
+#endif
       if (isEpaperActive()) {
          deinitDisplay();
          // ESP.restart();
