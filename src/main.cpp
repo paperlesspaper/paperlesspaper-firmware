@@ -2269,13 +2269,10 @@ bool resetAll(bool resetActivation, bool resetWifi) {
 void debugCheck() {
    Serial.println("[DEBUG] Deploy State");
 
-#ifdef EPD_TYPE_13INCH
-   sdInit(true);  // forceFormat formats the SD card via FatFormatter
-#endif
-   SerialFlash.eraseAll();
+   /*SerialFlash.eraseAll();
    while (!SerialFlash.ready()) {
       vTaskDelay(10);
-   }
+   }*/
 
    nvs_flash_erase();
    nvs_flash_init();
@@ -2376,31 +2373,25 @@ bool sdInit(bool forceFormat) {
    if (systemData.sdIsInit && !forceFormat) return true;
    if (forceFormat || !sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
       Serial.println("[SD] mount failed, attempting to format the card...");
-      FatFormatter fatFormatter;
-      uint8_t buffer[512];
-      SdCardFactory cardFactory;
-      SdCard* m_card = cardFactory.newCard(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED));
-
-      if (!m_card || m_card->errorCode()) {
+      // sd.end();
+      if (!sd.cardBegin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
          Serial.println("[SD] Hardware error: could not detect SD card!");
          return false;
-      } else {
-         bool formatSuccess = fatFormatter.format(m_card, buffer, &Serial);
-         if (formatSuccess) {
-            Serial.println("Format complete! Retrying mount...");
-            if (sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
-               Serial.println("[SD] mounted successfully after format.");
-               systemData.sdIsInit = true;
-               return true;
-            } else {
-               Serial.println("[SD] mount failed even after format.");
-               return false;
-            }
+      }
+
+      // FsFormatter unterstützt FAT16, FAT32 und exFAT (>32GB)
+      if (sd.format(&Serial)) {
+         Serial.println("Format complete! Retrying mount...");
+         if (sd.volumeBegin()) {
+            Serial.println("[SD] mounted successfully after format.");
+            systemData.sdIsInit = true;
+            return true;
          } else {
-            Serial.println("[SD] Format failed!");
-            return false;
+            Serial.println("[SD] mount failed even after format.");
          }
       }
+      Serial.println("[SD] Format failed!");
+      return false;
    } else {
       Serial.println("[SD] initialization done.");
       systemData.sdIsInit = true;
@@ -2737,16 +2728,17 @@ void test() {
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
 
+   debugCheck();
+   while (true) {
+      Serial.printf("Start Voltage: %d mV\n", systemData.vddValue);
+      delay(5000);
+   }
+
    sprintf(charBuffer, "Voltage: %d mV", systemData.vddValue);
    powerSupplyDisplay(true);
    delay(100);
 
    displaySetText(charBuffer, false, true);
-
-   while (true) {
-      Serial.printf("Start Voltage: %d mV\n", systemData.vddValue);
-      delay(5000);
-   }
 
    // displaySetQrPartial();
    // displayPartialTest(false);
