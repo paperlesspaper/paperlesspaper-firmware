@@ -1524,6 +1524,9 @@ bool isEpaperActive() {
    return epaperIsUpdating;
 }
 
+// Sets display rotation based on rotation mode:
+// 0 = Normal / upright orientation
+// 1 = 180 degree inverted / upside-down orientation
 void displaySetRotation(int orientation) {
    switch (orientation) {
       case 0:

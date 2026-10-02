@@ -2269,13 +2269,10 @@ bool resetAll(bool resetActivation, bool resetWifi) {
 void debugCheck() {
    Serial.println("[DEBUG] Deploy State");
 
-#ifdef EPD_TYPE_13INCH
-   sdInit(true);  // forceFormat formats the SD card via FatFormatter
-#endif
-   SerialFlash.eraseAll();
+   /*SerialFlash.eraseAll();
    while (!SerialFlash.ready()) {
       vTaskDelay(10);
-   }
+   }*/
 
    nvs_flash_erase();
    nvs_flash_init();
@@ -2376,31 +2373,25 @@ bool sdInit(bool forceFormat) {
    if (systemData.sdIsInit && !forceFormat) return true;
    if (forceFormat || !sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
       Serial.println("[SD] mount failed, attempting to format the card...");
-      FatFormatter fatFormatter;
-      uint8_t buffer[512];
-      SdCardFactory cardFactory;
-      SdCard* m_card = cardFactory.newCard(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED));
-
-      if (!m_card || m_card->errorCode()) {
+      // sd.end();
+      if (!sd.cardBegin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
          Serial.println("[SD] Hardware error: could not detect SD card!");
          return false;
-      } else {
-         bool formatSuccess = fatFormatter.format(m_card, buffer, &Serial);
-         if (formatSuccess) {
-            Serial.println("Format complete! Retrying mount...");
-            if (sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
-               Serial.println("[SD] mounted successfully after format.");
-               systemData.sdIsInit = true;
-               return true;
-            } else {
-               Serial.println("[SD] mount failed even after format.");
-               return false;
-            }
+      }
+
+      // FsFormatter unterstützt FAT16, FAT32 und exFAT (>32GB)
+      if (sd.format(&Serial)) {
+         Serial.println("Format complete! Retrying mount...");
+         if (sd.volumeBegin()) {
+            Serial.println("[SD] mounted successfully after format.");
+            systemData.sdIsInit = true;
+            return true;
          } else {
-            Serial.println("[SD] Format failed!");
-            return false;
+            Serial.println("[SD] mount failed even after format.");
          }
       }
+      Serial.println("[SD] Format failed!");
+      return false;
    } else {
       Serial.println("[SD] initialization done.");
       systemData.sdIsInit = true;
@@ -2558,6 +2549,20 @@ int accInit(bool skipInit) {
       acc_z = round((int)(acc_z_loc * 10));
    }
 
+#ifdef EPD_TYPE_13INCH
+   if (acc_y > 5 && acc_x < 5 && acc_x > -5) {
+      orientation = 0;
+   }
+   if (acc_x < -5 && acc_y < 5 && acc_y > -5) {
+      orientation = 1;
+   }
+   if (acc_y < -5 && acc_x < 5 && acc_x > -5) {
+      orientation = 2;
+   }
+   if (acc_x > 5 && acc_y < 5 && acc_y > -5) {
+      orientation = 3;
+   }
+#else
    if (acc_x > 5 && acc_y < 5 && acc_y > -5) {
       orientation = 0;
    }
@@ -2570,6 +2575,7 @@ int accInit(bool skipInit) {
    if (acc_x < 5 && acc_x > -5 && acc_y < -5) {
       orientation = 3;
    }
+#endif
 
    if (DEBUG_FLAG && !skipInit) Serial.printf("[ACC] Values: X:%d Y:%d Z:%d Orient: %d \n", acc_x, acc_y, acc_z, orientation);
 
@@ -2595,11 +2601,19 @@ bool accIntSet(int sensity) {
 
 void accUpdateOrient() {
    systemData.deviceOrientation = accInit();
+#ifdef EPD_TYPE_13INCH
+   if (systemData.deviceOrientation == 1 || systemData.deviceOrientation == 2) {
+      displaySetRotation(1);
+   } else {
+      displaySetRotation(0);
+   }
+#else
    if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
       displaySetRotation(1);
    } else {
       displaySetRotation(0);
    }
+#endif
    return;
 }
 
@@ -2612,11 +2626,19 @@ void recheckAccOrient(int setOrientValue) {
       Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
       writeIntToFlash(systemData.deviceOrientation, 220);
       // writeIntToFlash(0, 150);  // Reset picture version after ota to init update
+#ifdef EPD_TYPE_13INCH
+      if (systemData.deviceOrientation == 1 || systemData.deviceOrientation == 2) {
+         displaySetRotation(1);
+      } else {
+         displaySetRotation(0);
+      }
+#else
       if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
          displaySetRotation(1);
       } else {
          displaySetRotation(0);
       }
+#endif
       if (isEpaperActive()) {
          deinitDisplay();
          // ESP.restart();
@@ -2737,16 +2759,17 @@ void test() {
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
 
+   debugCheck();
+   while (true) {
+      Serial.printf("Start Voltage: %d mV\n", systemData.vddValue);
+      delay(5000);
+   }
+
    sprintf(charBuffer, "Voltage: %d mV", systemData.vddValue);
    powerSupplyDisplay(true);
    delay(100);
 
    displaySetText(charBuffer, false, true);
-
-   while (true) {
-      Serial.printf("Start Voltage: %d mV\n", systemData.vddValue);
-      delay(5000);
-   }
 
    // displaySetQrPartial();
    // displayPartialTest(false);
