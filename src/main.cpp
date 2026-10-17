@@ -1,6 +1,7 @@
 // #include <FS.h>
 #include "epaper_display.h"
 #include "types.h"
+#include "version_check.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
 
@@ -220,7 +221,7 @@ bool downloadStart = true;
 bool deviceActivated = false;
 bool deviceActivationNotStarted = false;
 bool deviceActivationReset = false;
-bool isNewVersion = false;
+version_check::ResponseState versionResponseState = version_check::ResponseState::Pending;
 bool isDlUrl = false;
 bool periodicLedIsOn = false;
 int periodicLedTimeout = 0;
@@ -232,7 +233,7 @@ bool isBleClientConnected = false;
 
 void ledBlink(int timeout, bool on, int dimValue = 100);
 bool awsConnect(bool connect);
-bool getVersionUpdate(void);
+version_check::Result getVersionUpdate(void);
 void startupCounter(int reset);
 bool resetAll(bool resetActivation, bool resetWifi);
 bool wifiConnectionLostStore(bool setNoWifi = false, bool reset = false);
@@ -303,7 +304,12 @@ void iotReceiveHandler(String& topic, String& payload) {
    if (DEBUG_FLAG) Serial.print("[AWS RX] Message Received: ");
    if (DEBUG_FLAG) Serial.println(payload);
    JsonDocument doc;
-   deserializeJson(doc, payload);
+   if (deserializeJson(doc, payload)) {
+      // The shared receive topic also carries settings, URLs and commands.
+      // Malformed JSON cannot be attributed to the outstanding version reply.
+      Serial.println("[AWS RX] Invalid JSON response");
+      return;
+   }
 
    if (doc["url"].is<JsonString>()) {
       Serial.println("[AWS RX] Picture URL Message");
@@ -342,10 +348,7 @@ void iotReceiveHandler(String& topic, String& payload) {
       }
    }
 
-   if (doc["t"].is<long>()) {
-      newVersionSave = doc["t"].as<long>();
-      isNewVersion = true;
-   }
+   version_check::receiveVersion(doc["t"], versionResponseState, newVersionSave);
 
    if (doc["act"].is<JsonString>()) {
       const char* activated;
@@ -1495,31 +1498,21 @@ int loadImageFromWeb(String url, String fileName) {
    return -1;
 }
 
-bool getVersionUpdate(void) {
-   bool isUpdate = false;
-   if (!isNewVersion) {
-      int counter = 0;
-      while (counter < 50 && !isNewVersion) {
-         delay(100);
-      }
-   }
-   if (isNewVersion) {
-      isNewVersion = false;
-      int oldVersion = readIntFromFlash(150);
+version_check::Result getVersionUpdate(void) {
+   const int oldVersion = readIntFromFlash(150);
+   const auto result = version_check::waitForVersion(
+       client, versionResponseState, newVersionSave, oldVersion,
+       []() -> uint32_t { return millis(); },
+       [](uint32_t milliseconds) { delay(milliseconds); });
+   if (result == version_check::Result::UpdateAvailable || result == version_check::Result::NoUpdate) {
       Serial.print("[MAIN] Flash File Version (OLD|NEW): ");
       Serial.print(oldVersion);
       Serial.print(" | ");
       Serial.println(newVersionSave);
-
-      if (newVersionSave > oldVersion) {
-         Serial.println("[MAIN] Device will update Image");
-         isUpdate = true;
-      } else {
-         Serial.println("[MAIN] No new Image Version");
-         isUpdate = false;
-      }
+      Serial.println(result == version_check::Result::UpdateAvailable
+                         ? "[MAIN] Device will update Image" : "[MAIN] No new Image Version");
    }
-   return isUpdate;
+   return result;
 }
 
 String setLeadingZero(String input) {
@@ -3061,9 +3054,17 @@ void setup() {
 
    // TODO: Force Update after wifi screen if just one connection loss and then back
    // Set EEPROM on wifi screen and read here. If true and picture version is not 0 then update
-   bool isUpdate = getVersionUpdate();
-   // if (DEBUG_FLAG) isUpdate = true;  // TODO: remove in production, only for testing
-   if (!isUpdate) {
+   const auto versionResult = getVersionUpdate();
+   if (versionResult != version_check::Result::UpdateAvailable &&
+       versionResult != version_check::Result::NoUpdate) {
+      // Missing/invalid data is not a confirmed "no picture" response. Preserve
+      // the display and file version; retry only at the next scheduled wakeup.
+      Serial.printf("[MAIN] Version check failed (%d) - retry at next wakeup\n",
+                    static_cast<int>(versionResult));
+      gotToDeepSleep(systemData.sleepPrediction, false, true);
+      return;
+   }
+   if (versionResult == version_check::Result::NoUpdate) {
       if (newVersionSave <= 0) {
          if (readIntFromFlash(150) <= 0) {
             if (powerSupplyDisplay(true)) delay(100);
