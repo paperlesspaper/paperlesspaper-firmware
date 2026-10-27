@@ -65,10 +65,13 @@ Verwaltet das gezielte Rollout von Pre-Release Firmware auf Pilotgeräte über A
 - **Canary Deploy:** Schreibt die FOTA-URL in den AWS IoT Named Shadow `settings.otaUrl` der Zielgeräte.
 - **Rollback / Reset:** Setzt Zielgeräte auf die reguläre Hauptfirmware (`espfota_{target}.json`) zurück.
 - **Flottenscan (`--recommend`):** Durchsucht DynamoDB `iotCatalog` nach geeigneten Pilotgeräten (Filter nach EPD7/EPD13, Wakeup-Intervallen 60/180s, vor < 1h online, Akkustand, StartCounter).
+- **Zielversions-Ausschlussfilter:** Erkennt automatisch die Ziel-Version (aus S3-Manifest, CLI oder types.h) und schließt Geräte, die diese Version bereits installiert haben, strikt von den Empfehlungen aus (damit nur echte Test-Updates stattfinden).
 
 ### Wichtigste Optionen
 - `--device-ids <liste>`: Kommagetrennte Geräte-IDs (z. B. `"epd7-001,epd13-002"`).
 - `--target-devices <pfad>`: JSON-Datei mit Zielgeräten (alternativ `canary_target_devices.json`).
+- `--target-version <version>`: Ziel-Firmware-Version für den Test (z. B. `3.0.25`). Geräte mit dieser Version werden ausgeschlossen.
+- `--channel <dev|pre|prod>` / `--pre`: Zielkanal für automatische FOTA-Manifest- & Versionserkennung (Standard lokal: `pre`).
 - `--apply`: Führt das Schreiben auf AWS IoT Shadows tatsächlich aus (erfordert `--confirm-ota`).
 - `--confirm-ota <token>`: Bestätigungs-Token (`I_CONFIRM_CANARY_OTA`).
 - `--reset`: Setzt Geräte auf die Hauptfirmware zurück.
@@ -86,8 +89,11 @@ python tools/select_pilot_devices.py --device-ids "epd7-010203,epd13-040506" --a
 # 3. Rollback der Pilotgeräte auf die reguläre Produktions-Firmware
 python tools/select_pilot_devices.py --device-ids "epd7-010203,epd13-040506" --reset --apply --confirm-ota I_CONFIRM_CANARY_OTA
 
-# 4. Flottenscan nach stabilen Kandidaten durchführen
+# 4. Flottenscan nach stabilen Kandidaten durchführen (schließt Geräte mit Zielversion automatisch aus)
 python tools/select_pilot_devices.py --recommend --count 5
+
+# 5. Flottenscan mit expliziter Zielversion
+python tools/select_pilot_devices.py --recommend --count 5 --target-version 3.0.25
 ```
 
 ---

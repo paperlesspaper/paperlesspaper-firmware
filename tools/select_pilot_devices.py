@@ -19,6 +19,8 @@ import sys
 import json
 import time
 import argparse
+import re
+import urllib.request
 from datetime import datetime, timezone
 
 # Windows CLI Encoding-Fix
@@ -84,6 +86,63 @@ def mask_epd_id(uid):
     if len(rest) == 3:
         return f"{prefix}***{rest[0]}*{rest[-1]}"
     return f"{prefix}***{rest[-3]}*{rest[-1]}"
+
+
+def normalize_version(version_str):
+    """
+    Normalisiert Versionsstrings für präzisen semantischen Vergleich.
+    Entfernt Präfixe wie 'v', 'b', 'dev-', etc.
+    Beispiele:
+    - '3.0.25'     -> '3.0.25'
+    - 'b3.0.25'    -> '3.0.25'
+    - 'v3.0.25'    -> '3.0.25'
+    - '3.0.25-rc1' -> '3.0.25'
+    """
+    if not version_str:
+        return ""
+    v = str(version_str).strip()
+    m = re.search(r'(?:^|[^\d])(\d+(?:\.\d+)+)', v)
+    if m:
+        return m.group(1)
+    return v.lower().lstrip("bv").strip()
+
+
+def is_target_version_installed(device_fw, target_fw):
+    """
+    Prüft, ob ein Gerät bereits die Ziel-Firmware-Version installiert hat.
+    Verhindert falsch-positive Substring-Treffer (z. B. '3.0.2' vs '3.0.25').
+    """
+    if not device_fw or not target_fw:
+        return False
+
+    d_raw = str(device_fw).strip().lower()
+    t_raw = str(target_fw).strip().lower()
+
+    # Platzhalter oder unbekannte Versionen niemals als Treffer werten
+    if d_raw in ("unbekannt", "unknown", "-", "0.0.0", "x.x.x") or t_raw in ("unbekannt", "unknown", "-", "0.0.0", "x.x.x"):
+        return False
+
+    # 1. Direkter Stringvergleich (case-insensitive)
+    if d_raw == t_raw:
+        return True
+
+    # 2. Vergleich nach lstrip('bv')
+    if d_raw.lstrip("bv") == t_raw.lstrip("bv"):
+        return True
+
+    # 3. Normalisierter semantischer Versionsvergleich
+    d_norm = normalize_version(d_raw)
+    t_norm = normalize_version(t_raw)
+    if d_norm and t_norm and d_norm == t_norm:
+        return True
+
+    # 4. Wortgrenzen-Regex-Prüfung (falls Firmware Zusätze wie '3.0.25-prod' oder 'b3.0.25_dirty' hat)
+    if t_norm:
+        pattern = r'(?<!\d)' + re.escape(t_norm) + r'(?!\d)'
+        if re.search(pattern, d_raw):
+            return True
+
+    return False
 
 
 def _load_env():
@@ -242,7 +301,7 @@ def parse_device_metrics(item):
     except (ValueError, TypeError):
         last_update_sec = 0.0
 
-    fw_version = str(item.get("fwVersion") or dev_data.get("firmware") or "unbekannt")
+    fw_version = str(item.get("fwVersion") or dev_data.get("firmware") or "unbekannt").strip()
     org_name = str(item.get("organizationName") or dev_data.get("organizationName") or "-")
 
     return {
@@ -260,11 +319,12 @@ def parse_device_metrics(item):
     }
 
 
-def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age_days=7, max_age_hours=1.0):
+def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age_days=7, max_age_hours=1.0, target_version=None):
     """
     Berechnet einen Eignungs-Score (0 bis 100) für Canary-Updates:
     - Nur aktive Geräte erhalten Punkte.
     - Nur Geräte, die vor weniger als max_age_hours online waren (Standard: 1.0h).
+    - Ausschluss: Geräte mit bereits installierter Ziel-Firmware erhalten 0 Punkte.
     - Timeout 60s (hohe Frequenz): +40 Pkt, Timeout 180s: +30 Pkt.
     - Kürzliche Aktivität: Je neuer, desto höher (bis zu +30 Pkt).
     - Niedriger StartCounter (<= 1): +15 Pkt, (== 2): +5 Pkt, (>= 3): -30 Pkt (Crash-Loop-Gefahr!).
@@ -272,6 +332,9 @@ def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age
     """
     if not device_info["active"]:
         return 0.0, ["Gerät ist nicht aktiv/aktiviert"]
+
+    if target_version and is_target_version_installed(device_info.get("fw_version"), target_version):
+        return 0.0, [f"Zielversion {target_version} bereits installiert (Aktuell: {device_info.get('fw_version')})"]
 
     now = time.time()
     age_sec = now - device_info["last_update_ts"] if device_info["last_update_ts"] > 0 else 99999999
@@ -347,12 +410,13 @@ def calculate_suitability_score(device_info, allowed_timeouts=(60, 180), max_age
     return final_score, notes
 
 
-def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180), max_age_hours=1.0):
+def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180), max_age_hours=1.0, target_version=None):
     """
     Filtert und bewertet alle gescannten Geräte und liefert je Modell
     (EPD7 und EPD13) eine Liste der am besten geeigneten Kandidaten.
-    Wählt für Empfehlungen ausschließlich Geräte aus, die vor weniger als max_age_hours (Standard: 1.0h)
-    zuletzt online waren.
+    Wählt für Empfehlungen ausschließlich Geräte aus, die:
+    - vor weniger als max_age_hours (Standard: 1.0h) zuletzt online waren
+    - noch NICHT die zu prüfende Ziel-Firmware-Version installiert haben.
     """
     epd7_candidates = []
     epd13_candidates = []
@@ -363,20 +427,25 @@ def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180
         score, notes = calculate_suitability_score(
             parsed,
             allowed_timeouts=allowed_timeouts,
-            max_age_hours=max_age_hours
+            max_age_hours=max_age_hours,
+            target_version=target_version
         )
         parsed["score"] = score
         parsed["notes"] = notes
         parsed["age_hours"] = (now - parsed["last_update_ts"]) / 3600.0 if parsed["last_update_ts"] > 0 else 99999999
+        parsed["has_target_version"] = bool(target_version and is_target_version_installed(parsed.get("fw_version"), target_version))
 
         if parsed["model"] == "EPD7":
             epd7_candidates.append(parsed)
         elif parsed["model"] == "EPD13":
             epd13_candidates.append(parsed)
 
-    # Nur aktive Geräte mit Score > 0 und Aktivität vor < max_age_hours für Empfehlungen zulassen
+    # Nur aktive Geräte mit Score > 0, Aktivität vor < max_age_hours
+    # und OHNE bereits installierte Zielversion für Empfehlungen zulassen
     def _is_eligible(d):
         if not d.get("active") or d.get("score", 0) <= 0:
+            return False
+        if target_version and d.get("has_target_version"):
             return False
         if max_age_hours is not None and max_age_hours > 0:
             return d.get("age_hours", 99999) <= max_age_hours
@@ -384,6 +453,9 @@ def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180
 
     eligible_epd7 = [d for d in epd7_candidates if _is_eligible(d)]
     eligible_epd13 = [d for d in epd13_candidates if _is_eligible(d)]
+
+    excluded_epd7 = [d for d in epd7_candidates if d.get("has_target_version") and d.get("active")]
+    excluded_epd13 = [d for d in epd13_candidates if d.get("has_target_version") and d.get("active")]
 
     # Nach Score absteigend sortieren, bei Punktgleichheit nach kürzestem Timeout (z. B. 60s vor 180s)
     # und anschließend nach neuester Aktivität
@@ -399,15 +471,18 @@ def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180
     recommended_epd13 = eligible_epd13[:target_count]
 
     return {
+        "target_version": target_version,
         "epd7": {
             "total_found": len(eligible_epd7),
             "total_catalog": len(epd7_candidates),
+            "excluded_same_version": len(excluded_epd7),
             "recommendations": recommended_epd7,
             "all_scored": epd7_candidates
         },
         "epd13": {
             "total_found": len(eligible_epd13),
             "total_catalog": len(epd13_candidates),
+            "excluded_same_version": len(excluded_epd13),
             "recommendations": recommended_epd13,
             "all_scored": epd13_candidates
         }
@@ -416,6 +491,7 @@ def generate_recommendations(devices, target_count=10, allowed_timeouts=(60, 180
 
 def write_recommendations_markdown(results, output_file="pilot_recommendations.md"):
     """Schreibt einen übersichtlichen Markdown-Bericht mit Tabellen für EPD7 und EPD13."""
+    target_v = results.get("target_version")
     lines = [
         "# 📋 Canary Pilot-Geräte Empfehlungsbericht",
         f"*Generiert am: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}*",
@@ -424,14 +500,18 @@ def write_recommendations_markdown(results, output_file="pilot_recommendations.m
         "> **Sicherheitshinweis (Zero-OTA):** Dies ist eine reine Empfehlungsliste.",
         "> Es wurden **keine** Firmware-Updates ausgelöst. Übertrage die von dir gewünschten Geräte",
         "> in die Datei `canary_target_devices.json`.",
-        ""
     ]
+    if target_v:
+        lines.append(f">")
+        lines.append(f"> **Zu prüfende Ziel-Version:** `{target_v}` (Geräte mit dieser Firmware wurden von der Auswahl ausgeschlossen)")
+    lines.append("")
 
     for model_key, title in [("epd7", "EPD7 (7.5\" Hardware)"), ("epd13", "EPD13 (13.3\" Hardware)")]:
         data = results[model_key]
         recs = data["recommendations"]
         lines.append(f"## {title}")
-        lines.append(f"*Gefundene Kandidaten (vor < 1h online): {data['total_found']} | Empfohlene Top-Auswahl: {len(recs)}*")
+        excl_str = f" | Ausgeschlossen mit Zielversion '{target_v}': {data.get('excluded_same_version', 0)}" if target_v else ""
+        lines.append(f"*Gefundene Kandidaten (vor < 1h online): {data['total_found']}{excl_str} | Empfohlene Top-Auswahl: {len(recs)}*")
         lines.append("")
 
         if not recs:
@@ -494,6 +574,7 @@ def write_recommendations_json(results, output_file="pilot_recommendations.json"
 
     serializable = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "target_version": results.get("target_version"),
         "epd7": _mask_entries(results["epd7"]["recommendations"]),
         "epd13": _mask_entries(results["epd13"]["recommendations"])
     }
@@ -508,10 +589,11 @@ def write_template_target_file(results, template_file="canary_target_devices.jso
     if os.path.exists(template_file):
         return
 
+    cand_v = results.get("target_version") or "b3.0.X"
     template_data = {
         "description": "Vom Nutzer manuell freigegebene Zielgeräte für das Canary Pre-Release",
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "candidate_version": "b3.0.X",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00+00:00"),
+        "candidate_version": cand_v,
         "devices": [
             "epd7-XX",
             "epd7-XX",
@@ -534,6 +616,8 @@ def print_copy_paste_recommendations(results):
     epd7_ids = [d["serialNumber"] for d in results.get("epd7", {}).get("recommendations", [])]
     epd13_ids = [d["serialNumber"] for d in results.get("epd13", {}).get("recommendations", [])]
     all_ids = epd7_ids + epd13_ids
+    target_v = results.get("target_version")
+    v_flag = f' --target-version "{target_v}"' if target_v else ""
 
     for dev_id in all_ids:
         register_github_mask(dev_id)
@@ -549,6 +633,8 @@ def print_copy_paste_recommendations(results):
     print("\n" + "=" * 65, flush=True)
     print("📋 COPY & PASTE FÜR CANARY MONITOR & ROLLOUT", flush=True)
     print("=" * 65, flush=True)
+    if target_v:
+        print(f"📌 Ziel-Version für Canary-Test: {target_v}", flush=True)
     print(f"🎯 Alle empfohlenen Pilotgeräte ({len(all_ids)}):", flush=True)
     print(f'"{all_ids_str}"', flush=True)
 
@@ -562,20 +648,20 @@ def print_copy_paste_recommendations(results):
 
     print("\n💡 Fertige CLI-Befehle zum direkten Ausführen:", flush=True)
     print("▶ Canary Health-Gate Überwachung starten (Alle):", flush=True)
-    print(f'  python tools/canary_monitor.py --device-ids "{all_ids_str}" --watch', flush=True)
+    print(f'  python tools/canary_monitor.py --device-ids "{all_ids_str}"{v_flag} --watch', flush=True)
 
     if epd7_str:
         print("\n▶ Canary Health-Gate Überwachung (Nur EPD7):", flush=True)
-        print(f'  python tools/canary_monitor.py --device-ids "{epd7_str}" --watch', flush=True)
+        print(f'  python tools/canary_monitor.py --device-ids "{epd7_str}"{v_flag} --watch', flush=True)
 
     if epd13_str:
         print("\n▶ Canary Health-Gate Überwachung (Nur EPD13):", flush=True)
-        print(f'  python tools/canary_monitor.py --device-ids "{epd13_str}" --watch', flush=True)
+        print(f'  python tools/canary_monitor.py --device-ids "{epd13_str}"{v_flag} --watch', flush=True)
 
     print("\n▶ Canary Rollout ausführen (Trockenlauf / Dry-Run):", flush=True)
-    print(f'  python tools/select_pilot_devices.py --device-ids "{all_ids_str}"', flush=True)
+    print(f'  python tools/select_pilot_devices.py --device-ids "{all_ids_str}"{v_flag}', flush=True)
     print("\n▶ Canary Rollout ausführen (Echt / Apply):", flush=True)
-    print(f'  python tools/select_pilot_devices.py --device-ids "{all_ids_str}" --apply --confirm-ota {CONFIRMATION_PHRASE}', flush=True)
+    print(f'  python tools/select_pilot_devices.py --device-ids "{all_ids_str}"{v_flag} --apply --confirm-ota {CONFIRMATION_PHRASE}', flush=True)
     print("=" * 65 + "\n", flush=True)
 
 
@@ -724,18 +810,166 @@ def reset_ota_for_selected_devices(target_devices, dry_run=True, confirm_token="
                 pass
 
 
-def resolve_ota_url(ota_url=None, s3_bucket=None, branch=None):
+def resolve_ota_url(ota_url=None, s3_bucket=None, branch=None, channel=None):
     """
     Ermittelt die FOTA Manifest URL automatisch basierend auf Branch und S3-Bucket:
-    - main / master: espfota_{target}_pre.json (aus deploy_pre)
-    - andere Branches (z. B. paper-l/dev): espfota_{target}_dev.json (aus deploy)
+    - channel='pre' oder Branch main/master: espfota_{target}_pre.json (aus deploy_pre)
+    - channel='dev' oder andere Branches: espfota_{target}_dev.json (aus deploy)
+    - channel='prod': espfota_{target}.json (aus deploy_prod)
     """
     if ota_url:
         return ota_url
     bucket = s3_bucket or os.environ.get("S3_BUCKET_NAME") or os.environ.get("HIL_S3_BUCKET") or "ul.epaperframe.de"
-    branch_name = branch or os.environ.get("GITHUB_REF_NAME") or "dev"
-    mode = "pre" if branch_name in ("main", "master") else "dev"
+    if channel:
+        mode = channel.lower()
+    else:
+        branch_name = branch or os.environ.get("GITHUB_REF_NAME")
+        if branch_name:
+            mode = "pre" if branch_name.lower() in ("main", "master") else "dev"
+        else:
+            # Lokaler Standard: Für Canary Rollouts ist 'pre' (Pre-Release) die Referenz
+            mode = "pre"
+    if mode == "prod":
+        return f"http://{bucket}/espfota_{{target}}.json"
     return f"http://{bucket}/espfota_{{target}}_{mode}.json"
+
+
+def resolve_target_version(target_version=None, ota_url=None, s3_bucket=None, branch=None, channel=None, target_devices_file=None):
+    """
+    Ermittelt die Ziel-Firmware-Version für den Ausschlussfilter:
+    1. Explizit übergebener Parameter --target-version
+    2. candidate_version / target_version aus target-devices JSON-Datei
+    3. Umgebungsvariablen TARGET_VERSION, CANDIDATE_VERSION, FW_VERSION_DEVICE
+    4. Explizit übergebenes oder aufgelöstes FOTA-Manifest (--ota-url bzw. S3)
+    5. Fallback: Definition aus src/types.h (falls nicht 0.0.0 / X.X.X)
+    """
+    if target_version:
+        v_str = str(target_version).strip()
+        print(f"🎯 Ziel-Version (explizit via CLI): {v_str}")
+        return v_str
+
+    for env_k in ("TARGET_VERSION", "CANDIDATE_VERSION", "FW_VERSION_DEVICE", "FW_VERSION"):
+        v = os.environ.get(env_k)
+        if v and v.strip() and v.strip() not in ("0.0.0", "X.X.X", "b3.0.X"):
+            v_str = v.strip()
+            print(f"🎯 Ziel-Version (aus Umgebungsvariable {env_k}): {v_str}")
+            return v_str
+
+    check_files = [target_devices_file, "canary_target_devices.json"]
+    for cf in check_files:
+        if cf and os.path.isfile(cf):
+            try:
+                with open(cf, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        cand = data.get("candidate_version") or data.get("target_version")
+                        if cand and str(cand).strip() not in ("b3.0.X", "X.X.X", "0.0.0", ""):
+                            v_str = str(cand).strip()
+                            print(f"🎯 Ziel-Version (aus {cf}): {v_str}")
+                            return v_str
+            except Exception:
+                pass
+
+    manifest_url = resolve_ota_url(ota_url=ota_url, s3_bucket=s3_bucket, branch=branch, channel=channel)
+    if manifest_url:
+        for test_target in ("epd7", "epd13"):
+            test_url = manifest_url
+            if "{target}" in test_url:
+                test_url = test_url.replace("{target}", test_target)
+            elif "epd7" in test_url and test_target == "epd13":
+                test_url = test_url.replace("epd7", "epd13")
+            try:
+                req = urllib.request.Request(test_url, headers={"User-Agent": "pilot-selector/1.0"})
+                with urllib.request.urlopen(req, timeout=5) as res:
+                    m_data = json.loads(res.read().decode("utf-8"))
+                    v = m_data.get("version")
+                    if v and str(v).strip() not in ("0.0.0", "X.X.X"):
+                        v_str = str(v).strip()
+                        print(f"🔍 Automatisch erkannte Ziel-Version von S3 ({test_url}): {v_str}")
+                        return v_str
+            except Exception:
+                pass
+
+    try:
+        types_path = os.path.join(os.path.dirname(__file__), "..", "src", "types.h")
+        if os.path.isfile(types_path):
+            with open(types_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                m = re.search(r'#define\s+SOFTWARE_VERSION\s+"([^"]+)"', content)
+                if m and m.group(1) not in ("0.0.0", "X.X.X"):
+                    v_str = m.group(1).strip()
+                    print(f"🔍 Ziel-Version aus src/types.h erkannt: {v_str}")
+                    return v_str
+    except Exception:
+        pass
+
+    return None
+
+
+def validate_selected_targets_version(target_devices, target_version=None, table_name="iotCatalog", region=None, mock_file=None):
+    """
+    Überprüft eine explizite Liste von Zielgeräten vor dem Rollout darauf, ob einzelne
+    Geräte bereits die Zielversion installiert haben. Gibt bei Funden eine Warnung aus.
+    """
+    if not target_devices or not target_version:
+        return
+
+    mock_dict = {}
+    if mock_file and os.path.isfile(mock_file):
+        try:
+            with open(mock_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    mock_dict = {d.get("serialNumber"): d for d in data if isinstance(d, dict)}
+                elif isinstance(data, dict):
+                    mock_dict = data
+        except Exception:
+            pass
+
+    catalog_table = None
+    if not mock_dict:
+        try:
+            dynamo = get_dynamodb_resource(region=region)
+            catalog_table = dynamo.Table(table_name)
+        except Exception:
+            return
+
+    already_updated = []
+    for dev_id in target_devices:
+        item = None
+        if mock_dict:
+            item = mock_dict.get(dev_id)
+        elif catalog_table:
+            keys_to_try = [str(dev_id)]
+            if "-" in dev_id:
+                raw_mac = dev_id.split("-", 1)[1]
+                keys_to_try.extend([raw_mac, raw_mac.upper(), raw_mac.lower()])
+            else:
+                keys_to_try.extend([f"epd7-{dev_id}", f"epd13-{dev_id}"])
+            for k in keys_to_try:
+                try:
+                    res = catalog_table.query(
+                        KeyConditionExpression="serialNumber = :s",
+                        ExpressionAttributeValues={":s": k},
+                        Limit=1
+                    )
+                    items = res.get("Items", [])
+                    if items:
+                        item = items[0]
+                        break
+                except Exception:
+                    break
+
+        if item:
+            parsed = parse_device_metrics(item)
+            if is_target_version_installed(parsed.get("fw_version"), target_version):
+                already_updated.append((dev_id, parsed.get("fw_version")))
+
+    if already_updated:
+        print(f"\n⚠️ ACHTUNG: {len(already_updated)} der Zielgeräte haben laut DynamoDB bereits Version '{target_version}':")
+        for d_id, fw in already_updated:
+            print(f"   - {mask_epd_id(d_id)}: Aktuelle Firmware '{fw}'")
+        print("   ℹ️ Diese Geräte werden das Update im Zero-OTA Boot-Zyklus voraussichtlich ignorieren.\n")
 
 
 def main():
@@ -750,6 +984,9 @@ def main():
     parser.add_argument("--output-json", default="pilot_recommendations.json", help="Pfad zur JSON-Ausgabedatei")
     parser.add_argument("--target-devices", help="Pfad zu einer JSON-Datei mit benutzerdefinierten Zielgeräten")
     parser.add_argument("--device-ids", help="Kommagetrennte Liste manueller Zielgeräte (z. B. 'epd7-xxx,epd13-yyy')")
+    parser.add_argument("--target-version", help="Ziel-Firmware-Version für den Test (Geräte mit dieser Version werden ausgeschlossen)")
+    parser.add_argument("--channel", choices=["dev", "pre", "prod"], default=None, help="OTA-Kanal (dev, pre, prod) für automatische Manifest-Ermittlung")
+    parser.add_argument("--pre", dest="channel", action="store_const", const="pre", help="Verwendet den Pre-Release-Kanal ('pre') für Manifest & Version (Standard bei Canary)")
     parser.add_argument("--ota-url", help="FOTA Manifest URL für das Pre-Release (Standard: automatisch nach Branch)")
     parser.add_argument("--deploy", action="store_true", help="Rollt die Canary OTA URL auf die Zielgeräte aus")
     parser.add_argument("--apply", action="store_true", help="Aktiviert das tatsächliche Setzen/Zurücksetzen der Shadows (erfordert --confirm-ota)")
@@ -784,6 +1021,16 @@ def main():
     # Bereinigen von Platzhaltern wie "epd7-XX"
     selected_targets = [d for d in raw_targets if d and not d.endswith("-XX") and d != "XX"]
 
+    # Ziel-Version ermitteln
+    detected_version = resolve_target_version(
+        target_version=args.target_version,
+        ota_url=args.ota_url,
+        s3_bucket=os.environ.get("S3_BUCKET_NAME") or os.environ.get("HIL_S3_BUCKET"),
+        branch=os.environ.get("GITHUB_REF_NAME"),
+        channel=args.channel,
+        target_devices_file=args.target_devices
+    )
+
     # 1. Falls Reset-Modus
     if args.reset:
         if not selected_targets:
@@ -809,10 +1056,21 @@ def main():
         auto_url = resolve_ota_url(
             args.ota_url,
             s3_bucket=os.environ.get("S3_BUCKET_NAME") or os.environ.get("HIL_S3_BUCKET"),
-            branch=os.environ.get("GITHUB_REF_NAME")
+            branch=os.environ.get("GITHUB_REF_NAME"),
+            channel=args.channel
         )
         is_dry_run = not args.apply
         print(f"📡 Ziel-FOTA URL (Modell-Platzhalter {{target}}): {auto_url}")
+
+        if detected_version:
+            validate_selected_targets_version(
+                selected_targets,
+                target_version=detected_version,
+                table_name=args.table,
+                region=args.region,
+                mock_file=args.mock_file
+            )
+
         apply_ota_to_selected_devices(
             selected_targets,
             auto_url,
@@ -827,6 +1085,11 @@ def main():
         allowed_timeouts = tuple(int(x.strip()) for x in args.timeouts.split(",") if x.strip())
     except ValueError:
         allowed_timeouts = (60, 180)
+
+    if detected_version:
+        print(f"🚫 Ausschlusskriterium aktiv: Geräte mit Firmware '{detected_version}' werden von der Empfehlung ausgeschlossen.\n")
+    else:
+        print("ℹ️ Keine Ziel-Version definiert oder ermittelt (Versions-Ausschlussfilter inaktiv)\n")
 
     if args.mock_file and os.path.isfile(args.mock_file):
         print(f"📦 Verwende Mock-Gerätedaten aus: {args.mock_file}")
@@ -847,13 +1110,20 @@ def main():
         devices,
         target_count=args.count,
         allowed_timeouts=allowed_timeouts,
-        max_age_hours=args.max_age_hours
+        max_age_hours=args.max_age_hours,
+        target_version=detected_version
     )
 
     age_crit_str = f"vor < {args.max_age_hours}h online" if args.max_age_hours and args.max_age_hours > 0 else "alle"
     print(f"📊 Auswertungsergebnis (Kriterien: aktiv & {age_crit_str}):")
-    print(f"   - EPD7  Kandidaten im Katalog: {results['epd7']['total_found']} (Top {len(results['epd7']['recommendations'])} empfohlen)")
-    print(f"   - EPD13 Kandidaten im Katalog: {results['epd13']['total_found']} (Top {len(results['epd13']['recommendations'])} empfohlen)")
+    if detected_version:
+        print(f"   - Zu prüfende Ziel-Version: {detected_version} (bereits aktualisierte Geräte ausgeschlossen)")
+    excl_7 = results['epd7'].get('excluded_same_version', 0)
+    excl_13 = results['epd13'].get('excluded_same_version', 0)
+    excl_7_str = f" | {excl_7} wegen Zielversion {detected_version} ausgeschlossen" if detected_version else ""
+    excl_13_str = f" | {excl_13} wegen Zielversion {detected_version} ausgeschlossen" if detected_version else ""
+    print(f"   - EPD7  Kandidaten im Katalog: {results['epd7']['total_found']} (Top {len(results['epd7']['recommendations'])} empfohlen{excl_7_str})")
+    print(f"   - EPD13 Kandidaten im Katalog: {results['epd13']['total_found']} (Top {len(results['epd13']['recommendations'])} empfohlen{excl_13_str})")
 
     write_recommendations_markdown(results, output_file=args.output_md)
     write_recommendations_json(results, output_file=args.output_json)
