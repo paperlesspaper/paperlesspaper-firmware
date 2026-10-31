@@ -1,7 +1,6 @@
 // #include <FS.h>
 #include "epaper_display.h"
 #include "types.h"
-#include "version_check.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
 
@@ -221,7 +220,7 @@ bool downloadStart = true;
 bool deviceActivated = false;
 bool deviceActivationNotStarted = false;
 bool deviceActivationReset = false;
-version_check::ResponseState versionResponseState = version_check::ResponseState::Pending;
+bool isNewVersion = false;
 bool isDlUrl = false;
 bool periodicLedIsOn = false;
 int periodicLedTimeout = 0;
@@ -233,7 +232,7 @@ bool isBleClientConnected = false;
 
 void ledBlink(int timeout, bool on, int dimValue = 100);
 bool awsConnect(bool connect);
-version_check::Result getVersionUpdate(void);
+int getVersionUpdate(void);
 void startupCounter(int reset);
 bool resetAll(bool resetActivation, bool resetWifi);
 bool wifiConnectionLostStore(bool setNoWifi = false, bool reset = false);
@@ -305,8 +304,6 @@ void iotReceiveHandler(String& topic, String& payload) {
    if (DEBUG_FLAG) Serial.println(payload);
    JsonDocument doc;
    if (deserializeJson(doc, payload)) {
-      // The shared receive topic also carries settings, URLs and commands.
-      // Malformed JSON cannot be attributed to the outstanding version reply.
       Serial.println("[AWS RX] Invalid JSON response");
       return;
    }
@@ -348,7 +345,10 @@ void iotReceiveHandler(String& topic, String& payload) {
       }
    }
 
-   version_check::receiveVersion(doc["t"], versionResponseState, newVersionSave);
+   if (doc["t"].is<long>()) {
+      newVersionSave = doc["t"].as<long>();
+      isNewVersion = true;
+   }
 
    if (doc["act"].is<JsonString>()) {
       const char* activated;
@@ -1498,21 +1498,33 @@ int loadImageFromWeb(String url, String fileName) {
    return -1;
 }
 
-version_check::Result getVersionUpdate(void) {
-   const int oldVersion = readIntFromFlash(150);
-   const auto result = version_check::waitForVersion(
-       client, versionResponseState, newVersionSave, oldVersion,
-       []() -> uint32_t { return millis(); },
-       [](uint32_t milliseconds) { delay(milliseconds); });
-   if (result == version_check::Result::UpdateAvailable || result == version_check::Result::NoUpdate) {
-      Serial.print("[MAIN] Flash File Version (OLD|NEW): ");
-      Serial.print(oldVersion);
-      Serial.print(" | ");
-      Serial.println(newVersionSave);
-      Serial.println(result == version_check::Result::UpdateAvailable
-                         ? "[MAIN] Device will update Image" : "[MAIN] No new Image Version");
+// Returns 1 if update available, 0 if no update needed, -1 on timeout/error
+int getVersionUpdate(void) {
+   uint32_t started = millis();
+   while (!isNewVersion && (uint32_t)(millis() - started) < 5000) {
+      if (!client.connected() || !client.loop()) {
+         if (isNewVersion) break;
+         return -1;
+      }
+      if (!isNewVersion) delay(50);
    }
-   return result;
+   if (!isNewVersion) {
+      return -1;
+   }
+   isNewVersion = false;
+   int oldVersion = readIntFromFlash(150);
+   Serial.print("[MAIN] Flash File Version (OLD|NEW): ");
+   Serial.print(oldVersion);
+   Serial.print(" | ");
+   Serial.println(newVersionSave);
+
+   if (newVersionSave > oldVersion) {
+      Serial.println("[MAIN] Device will update Image");
+      return 1;
+   } else {
+      Serial.println("[MAIN] No new Image Version");
+      return 0;
+   }
 }
 
 String setLeadingZero(String input) {
@@ -3054,17 +3066,14 @@ void setup() {
 
    // TODO: Force Update after wifi screen if just one connection loss and then back
    // Set EEPROM on wifi screen and read here. If true and picture version is not 0 then update
-   const auto versionResult = getVersionUpdate();
-   if (versionResult != version_check::Result::UpdateAvailable &&
-       versionResult != version_check::Result::NoUpdate) {
-      // Missing/invalid data is not a confirmed "no picture" response. Preserve
-      // the display and file version; retry only at the next scheduled wakeup.
-      Serial.printf("[MAIN] Version check failed (%d) - retry at next wakeup\n",
-                    static_cast<int>(versionResult));
-      gotToDeepSleep(systemData.sleepPrediction, false, true);
+   int versionResult = getVersionUpdate();
+   // if (DEBUG_FLAG) versionResult = 1;  // TODO: remove in production, only for testing
+   if (versionResult < 0) {
+      Serial.println("[MAIN] Version check failed/timeout - retry at next wakeup");
+      gotToDeepSleep(settings.timeout > 0 ? systemData.sleepPrediction : DEFAULT_SLEEP, false, true);
       return;
    }
-   if (versionResult == version_check::Result::NoUpdate) {
+   if (versionResult == 0) {
       if (newVersionSave <= 0) {
          if (readIntFromFlash(150) <= 0) {
             if (powerSupplyDisplay(true)) delay(100);
