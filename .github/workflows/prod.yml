@@ -25,7 +25,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.x'
+          python-version: '3.13'
 
       - name: Validate Firmware Configuration
         run: python tools/validate_firmware_config.py
@@ -62,7 +62,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.x'
+          python-version: '3.13'
 
       - name: Restore PlatformIO Cache
         id: cache-pio-restore
@@ -349,7 +349,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.x'
+          python-version: '3.13'
 
       - name: Download Risk Report Artifact
         uses: actions/download-artifact@v8
