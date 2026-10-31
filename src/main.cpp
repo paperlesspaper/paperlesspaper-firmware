@@ -232,7 +232,7 @@ bool isBleClientConnected = false;
 
 void ledBlink(int timeout, bool on, int dimValue = 100);
 bool awsConnect(bool connect);
-bool getVersionUpdate(void);
+int getVersionUpdate(void);
 void startupCounter(int reset);
 bool resetAll(bool resetActivation, bool resetWifi);
 bool wifiConnectionLostStore(bool setNoWifi = false, bool reset = false);
@@ -303,7 +303,10 @@ void iotReceiveHandler(String& topic, String& payload) {
    if (DEBUG_FLAG) Serial.print("[AWS RX] Message Received: ");
    if (DEBUG_FLAG) Serial.println(payload);
    JsonDocument doc;
-   deserializeJson(doc, payload);
+   if (deserializeJson(doc, payload)) {
+      Serial.println("[AWS RX] Invalid JSON response");
+      return;
+   }
 
    if (doc["url"].is<JsonString>()) {
       Serial.println("[AWS RX] Picture URL Message");
@@ -1495,31 +1498,33 @@ int loadImageFromWeb(String url, String fileName) {
    return -1;
 }
 
-bool getVersionUpdate(void) {
-   bool isUpdate = false;
+// Returns 1 if update available, 0 if no update needed, -1 on timeout/error
+int getVersionUpdate(void) {
+   uint32_t started = millis();
+   while (!isNewVersion && (uint32_t)(millis() - started) < 5000) {
+      if (!client.connected() || !client.loop()) {
+         if (isNewVersion) break;
+         return -1;
+      }
+      if (!isNewVersion) delay(50);
+   }
    if (!isNewVersion) {
-      int counter = 0;
-      while (counter < 50 && !isNewVersion) {
-         delay(100);
-      }
+      return -1;
    }
-   if (isNewVersion) {
-      isNewVersion = false;
-      int oldVersion = readIntFromFlash(150);
-      Serial.print("[MAIN] Flash File Version (OLD|NEW): ");
-      Serial.print(oldVersion);
-      Serial.print(" | ");
-      Serial.println(newVersionSave);
+   isNewVersion = false;
+   int oldVersion = readIntFromFlash(150);
+   Serial.print("[MAIN] Flash File Version (OLD|NEW): ");
+   Serial.print(oldVersion);
+   Serial.print(" | ");
+   Serial.println(newVersionSave);
 
-      if (newVersionSave > oldVersion) {
-         Serial.println("[MAIN] Device will update Image");
-         isUpdate = true;
-      } else {
-         Serial.println("[MAIN] No new Image Version");
-         isUpdate = false;
-      }
+   if (newVersionSave > oldVersion) {
+      Serial.println("[MAIN] Device will update Image");
+      return 1;
+   } else {
+      Serial.println("[MAIN] No new Image Version");
+      return 0;
    }
-   return isUpdate;
 }
 
 String setLeadingZero(String input) {
@@ -3061,9 +3066,14 @@ void setup() {
 
    // TODO: Force Update after wifi screen if just one connection loss and then back
    // Set EEPROM on wifi screen and read here. If true and picture version is not 0 then update
-   bool isUpdate = getVersionUpdate();
-   // if (DEBUG_FLAG) isUpdate = true;  // TODO: remove in production, only for testing
-   if (!isUpdate) {
+   int versionResult = getVersionUpdate();
+   // if (DEBUG_FLAG) versionResult = 1;  // TODO: remove in production, only for testing
+   if (versionResult < 0) {
+      Serial.println("[MAIN] Version check failed/timeout - retry at next wakeup");
+      gotToDeepSleep(settings.timeout > 0 ? systemData.sleepPrediction : DEFAULT_SLEEP, false, true);
+      return;
+   }
+   if (versionResult == 0) {
       if (newVersionSave <= 0) {
          if (readIntFromFlash(150) <= 0) {
             if (powerSupplyDisplay(true)) delay(100);
