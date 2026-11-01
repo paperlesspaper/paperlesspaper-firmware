@@ -257,6 +257,7 @@ void sdTest(bool doLog = false);
 bool downloadBMPToFlash(const char* url, const char* filename, bool forceDownload = false);
 wakeup_reason_t getWakeupReason();
 void rebootIntoRomBootloader();
+bool setActivatedToMem(bool isActivated);
 
 void WiFiEvent(WiFiEvent_t event) {
    if (DEBUG_FLAG)
@@ -316,10 +317,11 @@ void iotReceiveHandler(String& topic, String& payload) {
    }
 
    if (doc["ota"].is<JsonString>()) {
-      const char* otaUrlTemp = doc["ota"];
-      size_t otaUrlLength = strlen(otaUrlTemp);
-      Serial.printf("[AWS RX] OTA URL received: '%s' (%d) \n", otaUrlTemp, otaUrlLength);
+      String otaUrl = doc["ota"].as<String>();
+      size_t otaUrlLength = otaUrl.length();
+      Serial.printf("[AWS RX] OTA URL received: '%s' (%d) \n", otaUrl.c_str(), otaUrlLength);
       if (otaUrlLength > 5) {
+         bool wasActivated = getActivatedFromMem();
          displaySetQuickRefresh(true);
          ledBlink(2000, true);
          Serial.println("[OTA] OTA via MQTT Started.....");
@@ -327,19 +329,37 @@ void iotReceiveHandler(String& topic, String& payload) {
          resetAll(false, false);
          waitDisplayComplete(false);
          powerSupplyDisplay(false);
-         if (strstr(otaUrlTemp, ".json") != nullptr) {
+         myEsp32FOTA.getHTTPCLient()->end();
+         myEsp32FOTA.getHTTPCLient()->setReuse(false);
+         bool ok = false;
+         if (otaUrl.indexOf(".json") != -1) {
             Serial.println("[OTA] Processing Manifest JSON...");
-            myEsp32FOTA.setManifestURL(otaUrlTemp);
-            bool ok = myEsp32FOTA.forceUpdate(false);
+            myEsp32FOTA.setManifestURL(otaUrl.c_str());
+            ok = myEsp32FOTA.forceUpdate(false);
+            if (!ok) {
+               Serial.println("[OTA] Manifest forceUpdate failed, retrying...");
+               myEsp32FOTA.getHTTPCLient()->end();
+               delay(1000);
+               ok = myEsp32FOTA.forceUpdate(false);
+            }
             if (!ok) {
                Serial.println("[OTA] ERROR: Manifest forceUpdate failed!");
             }
          } else {
             Serial.println("[OTA] Processing direct binary URL...");
-            bool ok = myEsp32FOTA.forceUpdate(otaUrlTemp, false);
+            ok = myEsp32FOTA.forceUpdate(otaUrl.c_str(), false);
+            if (!ok) {
+               Serial.println("[OTA] Binary forceUpdate failed, retrying...");
+               myEsp32FOTA.getHTTPCLient()->end();
+               delay(1000);
+               ok = myEsp32FOTA.forceUpdate(otaUrl.c_str(), false);
+            }
             if (!ok) {
                Serial.println("[OTA] ERROR: Binary forceUpdate failed!");
             }
+         }
+         if (!ok && wasActivated) {
+            setActivatedToMem(true);
          }
          delay(2000);
       }
@@ -2050,6 +2070,7 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    // previousWakeup = currentTime;  // this is important for next wakeup calculation, do not delete it.
    waitDisplayComplete(false);
    if (wakeuptimeout <= 0 && showScreen) {
+      if (powerSupplyDisplay(true)) delay(100);
       displayTurnOn();  // Ich schlafe screen
       waitDisplayComplete(true);
    }
@@ -2912,9 +2933,21 @@ void setup() {
    displaySetOverlayOption(VERSION, true);
    displaySetOverlayOption(BATTERY_INFO, true);
    displaySetOverlayOption(WIFI_SIGNAL, true);
-   myEsp32FOTA.setManifestURL(OTA_URL_DEV);
+   {
+      FOTAConfig_t fotaCfg = myEsp32FOTA.getConfig();
+      fotaCfg.name = (char*)"esp32-fota-http";
+      fotaCfg.manifest_url = (char*)OTA_URL_DEV;
+      fotaCfg.allow_reuse = false;
+      myEsp32FOTA.setConfig(fotaCfg);
+   }
 #else
-   myEsp32FOTA.setManifestURL(OTA_URL);
+   {
+      FOTAConfig_t fotaCfg = myEsp32FOTA.getConfig();
+      fotaCfg.name = (char*)"esp32-fota-http";
+      fotaCfg.manifest_url = (char*)OTA_URL;
+      fotaCfg.allow_reuse = false;
+      myEsp32FOTA.setConfig(fotaCfg);
+   }
 #endif
    displaySetOverlayOption(DEVICE_INFO_STRING, true);
    char firmwareVersion[] = SOFTWARE_VERSION;
