@@ -126,9 +126,14 @@ class ESP32HardwareController:
         while self._running:
             if not (self.ser and self.ser.is_open):
                 try:
-                    time.sleep(0.2)
-                    if self._running and self.ser:
-                        self.ser.open()
+                    time.sleep(0.15)
+                    if self._running:
+                        if self.ser:
+                            try:
+                                self.ser.close()
+                            except Exception:
+                                pass
+                        self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
                 except Exception:
                     time.sleep(0.2)
                     continue
@@ -148,14 +153,15 @@ class ESP32HardwareController:
                 if not self._running:
                     break
                 # Bei USB-Stromunterbrechung (z. B. WinError 5 / ClearCommError nach Relais-Puls):
-                # Toten Handle explizit schließen, damit im nächsten Schleifendurchlauf ser.open()
-                # nach der USB-Re-Enumeration aufgerufen werden kann.
+                # Toten Handle explizit schließen und verwerfen, damit im nächsten Schleifendurchlauf
+                # nach der USB-Re-Enumeration eine frische serial.Serial-Instanz geöffnet wird.
                 try:
-                    if self.ser and self.ser.is_open:
+                    if self.ser:
                         self.ser.close()
                 except Exception:
                     pass
-                time.sleep(0.2)
+                self.ser = None
+                time.sleep(0.15)
 
     def wait_for_pattern(self, pattern, timeout=30, case_sensitive=False, from_current=False):
         """
@@ -360,8 +366,9 @@ class ESP32HardwareController:
         off_dur = 1.5 if "13" in str(self.name) else 1.0
         last_counter = 0
         reset_triggered = False
+        threshold_reached = False
 
-        # Zyklen 1 bis (min_cycles - 1): Schnelle Zyklen vor Ablauf des 3.0s Firmware-Tickers
+        # Zyklen 1 bis (min_cycles - 1): Schnelle Zyklen vor Ablauf des Firmware-Tickers
         for cycle in range(1, min_cycles):
             print(f"⚡ [{self.name}] Power-Cycle {cycle}/{min_cycles} (Relais {target_relay}, Aus: {off_dur}s, An: 1.8s)...")
             self.clear_logs()
@@ -391,36 +398,65 @@ class ESP32HardwareController:
                 last_counter = counter_found
                 print(f"   ➔ Boot {cycle}: NVS Counter erkannt = {counter_found}/5")
 
-        # Letzter Zyklus (min_cycles): Strom trennen, wieder einschalten und AN LASSEN!
-        # Da StartCounter >= 5 erreicht ist, startet der Ticker nicht mehr und die Firmware
-        # führt in wifiSmart() den Factory-Reset (resetAll(true, true)) durch.
-        print(f"⚡ [{self.name}] Finaler Power-Cycle {min_cycles}/{min_cycles} (Relais {target_relay} bleibt AN)...")
-        self.clear_logs()
-        ESP32HardwareController.set_relay_power(target_relay, power_on=False)
-        time.sleep(off_dur)
-        ESP32HardwareController.set_relay_power(target_relay, power_on=True)
-
-        # Nach den Zyklen auf Ausführung des Factory-Resets in den Logs warten
-        print(f"⏳ [{self.name}] Warte auf Bestätigung des Factory-Resets ([MAIN] Reset - ACT 1 | WIFI 1)...")
-        t_wait = time.time() + 15.0
-        while time.time() < t_wait:
-            with self._lock:
-                logs = list(self.log_history)
-            for l in logs:
-                if (
-                    "Reset - ACT 1 | WIFI 1" in l
-                    or "Startup Counter RESET" in l
-                    or "Reset Device becaus still wifi" in l
-                    or "[EPD] QR Block:" in l
-                    or "[EPD] Wifi Activate Function: 0" in l
-                    or "[NETWORK] wait for wifi via ble" in l
-                    or "[BLE] BLE Advertising started" in l
-                ):
-                    reset_triggered = True
-                    break
-            if reset_triggered:
+            # Sobald StartCounter >= 5 erreicht ist (z. B. schon vor Zyklus 5 wegen vorheriger
+            # Hardware-Verifikation), deaktiviert die Firmware den Reset-Ticker in setup() und
+            # führt in wifiSmart() auf GENAU DIESEM Boot resetAll(true, true) aus.
+            # Ein weiterer Power-Cycle würde den laufenden Reset abbrechen, nachdem NVS bereits
+            # auf 0 zurückgesetzt wurde!
+            if reset_triggered or (counter_found is not None and counter_found >= 5):
+                threshold_reached = True
+                print(f"   ➔ Schwellenwert (>= 5/5) bei Zyklus {cycle} erreicht – Relais {target_relay} bleibt AN für Factory-Reset.")
                 break
-            time.sleep(0.3)
+
+        def _wait_for_reset_log(wait_sec):
+            nonlocal reset_triggered
+            time.sleep(0.5)
+            if not (self._running and self.ser and self.ser.is_open):
+                try:
+                    self.connect(retries=8, retry_delay=0.3)
+                except Exception:
+                    pass
+            t_end = time.time() + wait_sec
+            while time.time() < t_end:
+                if not (self._running and self.ser and self.ser.is_open):
+                    try:
+                        self.connect(retries=3, retry_delay=0.2)
+                    except Exception:
+                        pass
+                with self._lock:
+                    logs = list(self.log_history)
+                for l in logs:
+                    if (
+                        "Reset - ACT 1 | WIFI 1" in l
+                        or "Startup Counter RESET" in l
+                        or "Reset Device becaus still wifi" in l
+                        or "[EPD] QR Block:" in l
+                        or "[EPD] Wifi Activate Function: 0" in l
+                        or "[NETWORK] wait for wifi via ble" in l
+                        or "[BLE] BLE Advertising started" in l
+                    ):
+                        reset_triggered = True
+                        return True
+                if reset_triggered:
+                    return True
+                time.sleep(0.3)
+            return False
+
+        if threshold_reached:
+            print(f"⏳ [{self.name}] Warte auf Bestätigung des Factory-Resets ([MAIN] Reset - ACT 1 | WIFI 1)...")
+            _wait_for_reset_log(10.0)
+
+        if not reset_triggered:
+            # Letzter Zyklus (min_cycles): Strom trennen, wieder einschalten und AN LASSEN!
+            # Da StartCounter >= 5 erreicht ist, startet der Ticker nicht mehr und die Firmware
+            # führt in wifiSmart() den Factory-Reset (resetAll(true, true)) durch.
+            print(f"⚡ [{self.name}] Finaler Power-Cycle {min_cycles}/{min_cycles} (Relais {target_relay} bleibt AN)...")
+            self.clear_logs()
+            ESP32HardwareController.set_relay_power(target_relay, power_on=False)
+            time.sleep(off_dur)
+            ESP32HardwareController.set_relay_power(target_relay, power_on=True)
+            print(f"⏳ [{self.name}] Warte auf Bestätigung des Factory-Resets ([MAIN] Reset - ACT 1 | WIFI 1)...")
+            _wait_for_reset_log(15.0)
 
         assert reset_triggered, (
             f"[{self.name}] Factory-Reset konnte nicht verifiziert werden! "

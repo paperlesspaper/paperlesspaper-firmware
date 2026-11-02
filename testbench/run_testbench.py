@@ -313,7 +313,9 @@ def main():
         print(f"❌ HIL TESTBENCH FEHLGESCHLAGEN: Exit Code {exit_code}")
     print("=" * 65)
 
-    sys.exit(exit_code)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(int(exit_code))
 
 if __name__ == "__main__":
     main()
