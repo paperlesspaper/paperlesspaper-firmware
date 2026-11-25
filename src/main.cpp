@@ -1593,15 +1593,18 @@ bool awsConnect(bool connect) {
       if (DEBUG_FLAG) Serial.println("[AWS] is still connected...");
       return true;
    }
-   while (WiFi.status() != WL_CONNECTED) {
-      counter++;
-      WiFi.disconnect(true);
+   if (WiFi.status() != WL_CONNECTED) {
+      WiFi.mode(WIFI_STA);
+      WiFi.disconnect(false);
       WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
-      delay(1500);
-      Serial.print(".");
-      if (counter > 10) {
-         Serial.println("[AWS] Not connecting - NO WIFI");
-         return false;
+      while (WiFi.status() != WL_CONNECTED) {
+         counter++;
+         delay(500);
+         Serial.print(".");
+         if (counter >= 30) {
+            Serial.println("[AWS] Not connecting - NO WIFI");
+            return false;
+         }
       }
    }
 
@@ -3196,9 +3199,12 @@ void loop() {
             WiFi.mode(WIFI_STA);
             WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
             int wifiWait = 0;
-            while (WiFi.status() != WL_CONNECTED && wifiWait < 50) {
+            while (WiFi.status() != WL_CONNECTED && wifiWait < 150) {
                delay(100);
                wifiWait++;
+            }
+            if (WiFi.status() != WL_CONNECTED) {
+               Serial.println("[NETWORK] WiFi reconnect after EPD refresh timed out (15s)");
             }
          }
          Serial.println("[EPD] Set Image Done");
