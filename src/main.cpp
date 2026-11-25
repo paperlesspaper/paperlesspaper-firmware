@@ -2784,6 +2784,13 @@ void test() {
    ledBlink(0, false);
    char charBuffer[128];
    Serial.println("[DEBUG] Test Function");
+   powerSupplyDisplay(true);
+   displayNoiseTest();
+
+   displayNoiseTest(200, 200, 400, 400);
+   while (true) {
+   }
+   //   displayNoiseTest();
 
    debugCheck();
    while (true) {
@@ -2983,7 +2990,7 @@ void setup() {
    }
 
 #if DEBUG
-   // test();  //-----------------test---------please remove
+   test();  //-----------------test---------please remove
 #endif
    tickerFailsave.once_ms((FAILSAVE_TIMER * 1000) + (WIFI_INIT_TIME * 1000), timeoutFailsave, 0);
    testModeCheck();                   // check if needs to enter deploy state
@@ -3154,9 +3161,17 @@ void loop() {
          int dlSuccess = loadImageFromWeb(DL_URL, fileName);
          if (DEBUG_FLAG) setUpdateState("download_ok");  // also connects aws
          Serial.println("[DL] Done");
-         WiFi.setSleep(true);
          waitDisplayComplete(false);
          if (dlSuccess == 0) {
+            // Reduce peak battery load during display refresh: shut down WiFi/AWS/LED and lower CPU clock
+            awsConnect(false);
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+            ledBlink(0, false);
+            setCpuFrequencyMhz(80);
+            tickerFailsave.detach();
+            tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsave, 0);
+
             for (int i = 0; i < 5; i++) {
                accUpdateOrient();
                checkOrientationInBackground(systemData.deviceOrientation, true);
@@ -3174,6 +3189,16 @@ void loop() {
                } else {
                   break;
                }
+            }
+
+            // Restore CPU clock and reconnect WiFi for AWS status update
+            setCpuFrequencyMhz(160);
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
+            int wifiWait = 0;
+            while (WiFi.status() != WL_CONNECTED && wifiWait < 50) {
+               delay(100);
+               wifiWait++;
             }
          }
          Serial.println("[EPD] Set Image Done");

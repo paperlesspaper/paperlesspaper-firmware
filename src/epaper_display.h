@@ -76,6 +76,7 @@ void displaySetDownloadSleep_13();
 void displayWipe(bool quick, bool useAltInit = false, int color = 6);
 void displaySetBlankTest(int offsetVar, bool doQuickRefresh, bool useAltInit = false);
 void displayPartialTest(bool doQuickRefresh = false);
+void displayNoiseTest(int16_t x = 0, int16_t y = 0, int16_t w = 0, int16_t h = 0, bool doQuickRefresh = false);
 bool isEpaperActive();
 void displaySetRotation(int orientation);
 void displaySetQuickRefresh(bool enable, int refreshTime = 0, int wipeTime = 0);

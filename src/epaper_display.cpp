@@ -279,13 +279,16 @@ bool updateDisplayAsync(String functionName) {
 
 bool waitDisplayComplete(bool quick) {
    int counter = 0;
-   while (counter < 20) {
+   const int maxCounter = 90;  // up to 45s (13" full refresh can take ~30-40s)
+   while (counter < maxCounter) {
       counter++;
-      if (quick) counter = 21;
+      if (quick) counter = maxCounter + 1;
       bool pinState = digitalRead(BUSY_PIN);
       if (pinState) {
-         return true;
-         break;
+         delay(50);
+         if (digitalRead(BUSY_PIN)) {
+            return true;
+         }
       }
 #if DEBUG
       Serial.println("[EPD] Wait for Display...");
@@ -559,6 +562,7 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
 
    // PTLW (Partial Window) für beide Controller wieder deaktivieren,
    // damit der nachfolgende Refresh (DRF) den gesamten Bildschirm erfasst!
+   epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
    digitalWrite(CS_EPD_PIN, LOW);
    epd_spi_bus->transfer(0x83);
    for (int i = 0; i < 9; i++) epd_spi_bus->transfer(0x00);
@@ -568,6 +572,7 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
    epd_spi_bus->transfer(0x83);
    for (int i = 0; i < 9; i++) epd_spi_bus->transfer(0x00);
    digitalWrite(EPD_CS_S, HIGH);
+   epd_spi_bus->endTransaction();
 
    unsigned long refreshDuration = 0;
    if (doRefresh) {
@@ -585,8 +590,8 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
       return -4;
    }
 
-   if (doRefresh && refreshDuration < 10000) {
-      Serial.printf("[EPD] Refresh took only %lu ms, expected >= 10s\n", refreshDuration);
+   if (doRefresh && refreshDuration < 18000) {
+      Serial.printf("[EPD] Refresh took only %lu ms, expected >= 18s\n", refreshDuration);
       return -3;
    }
 
@@ -1492,6 +1497,69 @@ void displayPartialTest(bool doQuickRefresh) {
 #endif
 
 // Colors: 0:Black 1:Blue 2:Green 3:Red 4:XX 5:Yellow 6:White
+void displayNoiseTest(int16_t x, int16_t y, int16_t w, int16_t h, bool doQuickRefresh) {
+   static const uint16_t noiseColors[6] = {
+       GxEPD_BLACK, GxEPD_WHITE, GxEPD_YELLOW,
+       GxEPD_RED,   GxEPD_BLUE,  GxEPD_GREEN};
+
+   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, doQuickRefresh);
+   display.init(115200);
+   display.setRotation(0);
+
+   const int16_t dispW = display.width();
+   const int16_t dispH = display.height();
+   const bool isPartial = (w > 0 && h > 0);
+
+   if (isPartial) {
+      if (x < 0) { w += x; x = 0; }
+      if (y < 0) { h += y; y = 0; }
+      if (x >= dispW || y >= dispH || w <= 0 || h <= 0) {
+         Serial.println("[EPD] NoiseTest: rectangle out of bounds");
+         return;
+      }
+      if (x + w > dispW) w = dispW - x;
+      if (y + h > dispH) h = dispH - y;
+      display.setPartialWindow(x, y, w, h);
+      Serial.printf("[EPD] NoiseTest PARTIAL (%d, %d, %d x %d)\n", x, y, w, h);
+   } else {
+      x = 0;
+      y = 0;
+      w = dispW;
+      h = dispH;
+      display.setFullWindow();
+      Serial.printf("[EPD] NoiseTest FULL (%d x %d)\n", w, h);
+   }
+
+   const uint32_t baseSeed = esp_random() | 1UL;
+   const uint16_t totalPages = display.pages();
+   const int16_t pageH = (dispH + totalPages - 1) / totalPages;
+   uint16_t pageIdx = 0;
+
+   unsigned long startMs = millis();
+   display.firstPage();
+   do {
+      uint16_t p = pageIdx % totalPages;
+      int16_t pyStart = y + p * pageH;
+      int16_t pyEnd = pyStart + pageH;
+      if (pyEnd > y + h) pyEnd = y + h;
+
+      for (int16_t py = pyStart; py < pyEnd; py++) {
+         uint32_t rng = baseSeed ^ (uint32_t(py + 1) * 0x9E3779B9UL);
+         if (rng == 0) rng = 0x6D2B79F5UL;
+         for (int16_t px = x; px < x + w; px++) {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            display.drawPixel(px, py, noiseColors[rng % 6]);
+         }
+         if ((py & 0x0F) == 0) yield();
+      }
+      pageIdx++;
+   } while (display.nextPage());
+
+   Serial.printf("[EPD] NoiseTest done in %lu ms\n", millis() - startMs);
+}
+
 void displayWipe(bool quick, bool useAltInit, int color) {
    Serial.printf("[EPD] Display Wipe (%ds)\n", displaySettings.displayQuickRefreshWipeTime);
 
