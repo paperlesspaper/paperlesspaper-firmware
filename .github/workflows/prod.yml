@@ -20,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -33,7 +33,13 @@ jobs:
       - name: AI Firmware Risk Analysis
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python tools/ai_risk_analysis.py --strict --output risk_report.md
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          BASE_REF="$BEFORE_SHA"
+          if [ -z "$BASE_REF" ] || [ "$BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+            BASE_REF="$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo HEAD~1)"
+          fi
+          python tools/ai_risk_analysis.py --strict --base "$BASE_REF" --output risk_report.md
 
       - name: Upload Risk Report Artifact
         if: always()

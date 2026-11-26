@@ -20,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -33,7 +33,9 @@ jobs:
       - name: AI Firmware Risk Analysis
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python tools/ai_risk_analysis.py --output risk_report.md
+        run: |
+          git fetch origin main || true
+          python tools/ai_risk_analysis.py --base origin/main --output risk_report.md
 
       - name: Upload Risk Report Artifact
         if: always()

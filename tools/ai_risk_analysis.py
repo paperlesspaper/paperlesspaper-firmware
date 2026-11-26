@@ -28,8 +28,8 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 SYSTEM_PROMPT = """Du bist ein hochqualifizierter Senior Embedded Systems & Firmware Security Auditor, spezialisiert auf das PaperlessPaper E-Paper Ökosystem (ESP32-C6 Microcontroller EPD7/EPD13, PaperlessPaper Web/Mobile App und AWS IoT Cloud-Anbindung).
 Dokumentation des Gesamtsystems: https://github.com/paperlesspaper und https://github.com/paperlesspaper/paperlesspaper-docs.
 
-Deine Hauptaufgabe ist es, die aktuellen Änderungen (Git-Diff) und deren Auswirkung auf das Gesamtsystem zu prüfen sowie konkrete, umsetzbare Endprodukt- & App-Testaufgaben für den Anwender zu definieren.
-Der bereitgestellte Gesamtcode dient als Architektur- und Sicherheitskontext.
+Deine Hauptaufgabe ist es, die aktuellen Änderungen (Git-Diff) im Kontext der jüngsten Commit-Historie und deren Auswirkung auf das Gesamtsystem zu prüfen sowie konkrete, umsetzbare Endprodukt- & App-Testaufgaben für den Anwender zu definieren.
+Der bereitgestellte Gesamtcode dient als Architektur- und Sicherheitskontext. Nutze die bereitgestellte Commit-Historie, um zusammenhängende Änderungen, Nachbesserungen (Fix-auf-Fix) und weiterhin aktive Risiken im aktuellen Release-Delta zu erkennen.
 
 WICHTIGE PRIORISIERUNGS- UND STRUKTURREGELN:
 1. **Abschnitt 1: Bewertung der aktuellen Code-Änderungen (Git-Diff):** Steht an erster Stelle!
@@ -176,6 +176,36 @@ def get_codebase_context():
 
 
 
+def _ref_exists(ref):
+    if not ref or set(ref) == {"0"}:
+        return False
+    res = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref], capture_output=True, text=True)
+    return res.returncode == 0
+
+
+def get_recent_commits(base_ref=None, limit=10):
+    """Liefert eine kompakte Übersicht der jüngsten Commits (Delta-Commits + letzte Historie) als Kontext."""
+    try:
+        sections = []
+        if base_ref and _ref_exists(base_ref):
+            cmd_delta = ["git", "log", "--oneline", "--no-decorate", f"-n", "20", f"{base_ref}..HEAD"]
+            res_delta = subprocess.run(cmd_delta, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+            delta_log = res_delta.stdout.strip()
+            if delta_log:
+                sections.append(f"Commits im aktuellen Delta ({base_ref}..HEAD):\n{delta_log}")
+
+        cmd_recent = ["git", "log", "--oneline", "--no-decorate", f"-n", str(limit), "HEAD"]
+        res_recent = subprocess.run(cmd_recent, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+        recent_log = res_recent.stdout.strip()
+        if recent_log:
+            sections.append(f"Letzte {limit} Commits auf aktuellem Branch:\n{recent_log}")
+
+        return sanitize_diff("\n\n".join(sections))
+    except Exception as e:
+        print(f"Hinweis: Commit-Historie konnte nicht ermittelt werden: {e}")
+        return ""
+
+
 def get_git_diff(base_ref=None, staged_only=False):
     try:
         # Schließe sensible Dateien strikt aus dem Diff aus
@@ -195,9 +225,15 @@ def get_git_diff(base_ref=None, staged_only=False):
             return sanitize_diff(res.stdout.strip())
 
         if base_ref:
-            cmd = ["git", "diff", f"{base_ref}...HEAD", "--", "."] + exclude_specs
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True, encoding="utf-8", errors="ignore")
-            return sanitize_diff(res.stdout.strip())
+            if _ref_exists(base_ref):
+                cmd = ["git", "diff", f"{base_ref}...HEAD", "--", "."] + exclude_specs
+                res = subprocess.run(cmd, capture_output=True, text=True, check=True, encoding="utf-8", errors="ignore")
+                diff_base = res.stdout.strip()
+                if diff_base:
+                    return sanitize_diff(diff_base)
+                print(f"Hinweis: Kein Diff zwischen {base_ref} und HEAD gefunden, prüfe Fallback.")
+            else:
+                print(f"Hinweis: Basis-Ref '{base_ref}' nicht verfügbar, falle auf HEAD~1 zurück.")
 
         # Lokal: Zuerst prüfen, ob uncommittete Änderungen vorliegen (gestagt oder im Arbeitsverzeichnis vs HEAD)
         cmd_head = ["git", "diff", "HEAD", "--", "."] + exclude_specs
@@ -216,15 +252,23 @@ def get_git_diff(base_ref=None, staged_only=False):
         return ""
 
 
-def call_gemini(diff_text, codebase_text, api_key):
+def call_gemini(diff_text, codebase_text, api_key, commit_history=""):
     # Diff bei extrem großen Änderungen kürzen
     max_diff_chars = 40000
     if diff_text and len(diff_text) > max_diff_chars:
         diff_text = diff_text[:max_diff_chars] + "\n\n[... Diff gekürzt auf 40.000 Zeichen ...]"
 
     prompt_parts = [
-        "Führe die Firmware-Risikoanalyse durch. Fokussiere dich primär auf das Git-Diff und leite konkrete Test-Tasks für den Endnutzer am fertigen Gerät im Zusammenspiel mit der PaperlessPaper-App ab (keine Entwickler-/Build-Befehle!). Die ganzheitliche Systemanalyse des Gesamtcodes steht an letzter Stelle und ist bei geringem Risiko kompakt zu halten.\n\n"
+        "Führe die Firmware-Risikoanalyse durch. Fokussiere dich primär auf das Git-Diff im Kontext der jüngsten Commit-Historie und leite konkrete Test-Tasks für den Endnutzer am fertigen Gerät im Zusammenspiel mit der PaperlessPaper-App ab (keine Entwickler-/Build-Befehle!). Die ganzheitliche Systemanalyse des Gesamtcodes steht an letzter Stelle und ist bei geringem Risiko kompakt zu halten.\n\n"
     ]
+
+    if commit_history:
+        prompt_parts.append(
+            f"=================================================================\n"
+            f"### 0. COMMIT-HISTORIE (KONTEXT & AKTIVE ÄNDERUNGEN):\n"
+            f"=================================================================\n"
+            f"```text\n{commit_history}\n```\n\n"
+        )
 
     if diff_text:
         prompt_parts.append(
@@ -408,6 +452,7 @@ def format_summary_markdown(report_text, summary_info):
 def main():
     parser = argparse.ArgumentParser(description="KI-Firmware Risikoanalyse & Gesamtsystem-Audit via Google Gemini API")
     parser.add_argument("--base", help="Git Basis-Ref für den Diff (z.B. origin/main oder HEAD~1)")
+    parser.add_argument("--history-commits", type=int, default=10, help="Anzahl jüngster Commits als Kontext (Standard: 10)")
     parser.add_argument("--diff-file", help="Optionaler Pfad zu einer Datei, die das Git-Diff enthält")
     parser.add_argument("--staged", action="store_true", help="Nur gestagte Änderungen prüfen (git diff --cached)")
     parser.add_argument("--output", help="Optionaler Pfad zur Ausgabe des Markdown-Reports")
@@ -436,8 +481,9 @@ def main():
     else:
         diff_text = get_git_diff(args.base, staged_only=args.staged)
 
-    # Gesamten Firmware-Quellcode laden
+    # Gesamten Firmware-Quellcode und jüngste Commit-Historie laden
     codebase_text = get_codebase_context()
+    commit_history = get_recent_commits(args.base, limit=args.history_commits)
 
     if not diff_text and not codebase_text:
         print("ℹ️ Weder Code-Änderungen noch Quellcode-Dateien gefunden. Keine KI-Analyse erforderlich.")
@@ -445,6 +491,8 @@ def main():
 
     print("=" * 65)
     print("🤖 STARTE KI-RISIKOANALYSE & GESAMTSYSTEM-AUDIT")
+    if args.base:
+        print(f"🔀 Basis-Ref:       {args.base}")
     if diff_text:
         print(f"📏 Diff-Größe:      {len(diff_text):,} Zeichen")
     else:
@@ -453,7 +501,7 @@ def main():
     print("=" * 65)
 
     try:
-        report, used_model = call_gemini(diff_text, codebase_text, api_key)
+        report, used_model = call_gemini(diff_text, codebase_text, api_key, commit_history=commit_history)
         print(f"✨ Verwendetes Modell: {used_model}\n")
 
         summary_info = extract_risk_summary(report)
